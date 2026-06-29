@@ -1,0 +1,120 @@
+name: Build executables
+
+# Builds native, self-contained executables for Windows, Linux, and macOS on
+# GitHub's own runners (PyInstaller cannot cross-compile, so each OS is built on
+# a matching machine).
+#
+#   * Push a version tag (e.g. `git tag v1.0.0 && git push origin v1.0.0`)
+#     -> builds all platforms AND publishes a GitHub Release with the binaries.
+#   * "Run workflow" button (Actions tab) -> builds all platforms as downloadable
+#     workflow artifacts, without creating a release. Use this to test.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # required so the release job can create releases & upload assets
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+            asset: ShmagStick-Windows.exe
+          - os: ubuntu-latest
+            label: Linux
+            asset: ShmagStick-Linux
+          - os: macos-14 # Apple Silicon (arm64) — covers all Macs from late 2020 on.
+            label: macOS-AppleSilicon
+            asset: ShmagStick-macOS-AppleSilicon.zip
+          # Note: an Intel-Mac (macos-13) target was intentionally dropped — those
+          # runners are scarce and block the whole release. Intel users run from source.
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # Qt needs these shared libraries present (even headless) so PyInstaller
+      # can import PyQt6 during its analysis step.
+      - name: Install Qt system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Build with PyInstaller
+        run: pyinstaller ShmagStick.spec --noconfirm --clean
+
+      - name: Package executable (Windows)
+        if: runner.os == 'Windows'
+        run: copy "dist\ShmagStick.exe" "${{ matrix.asset }}"
+        shell: cmd
+
+      - name: Package executable (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cp dist/ShmagStick "${{ matrix.asset }}"
+          chmod +x "${{ matrix.asset }}"
+
+      - name: Package app bundle (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/ShmagStick.app "${{ matrix.asset }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Create / update release with binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,29 +1,5 @@
-#!/bin/bash
-# ShmagStick launcher for Linux and macOS
-set -e
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-# Check Python version
-PYTHON="${PYTHON:-python3}"
-if ! command -v "$PYTHON" &>/dev/null; then
-    echo "Error: $PYTHON not found. Install Python 3.9+ and retry."
-    exit 1
-fi
-
-VER=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-MAJOR=$(echo "$VER" | cut -d. -f1)
-MINOR=$(echo "$VER" | cut -d. -f2)
-if [ "$MAJOR" -lt 3 ] || ([ "$MAJOR" -eq 3 ] && [ "$MINOR" -lt 9 ]); then
-    echo "Error: Python 3.9+ required (found $VER)."
-    exit 1
-fi
-
-VENV="$SCRIPT_DIR/.venv"
-if [ ! -d "$VENV" ]; then
-    echo "Creating virtual environment..."
-    "$PYTHON" -m venv "$VENV"
-    "$VENV/bin/pip" install -r "$SCRIPT_DIR/requirements.txt"
-fi
-
-exec "$VENV/bin/python" "$SCRIPT_DIR/shmagstick.py" "$@"
+PyQt6>=6.5
+psutil>=5.9
+pywin32>=305; platform_system == "Windows"
+wmi>=1.5; platform_system == "Windows"
+comtypes>=1.2; platform_system == "Windows"

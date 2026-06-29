@@ -7,7 +7,7 @@ import os
 import platform as _platform_mod
 import sys
 
-from PyQt6.QtCore import Qt, QTimer, QUrl
+from PyQt6.QtCore import QThread, Qt, QTimer, QUrl
 from PyQt6.QtGui import QColor, QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication,
@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -25,21 +26,34 @@ from platforms import get_collector, PLATFORM_NAME
 from scoring.engine import evaluate
 from gui.styles import STYLESHEET
 from gui.gauge_widget import GaugeWidget
-from gui.card_widget import CategoryCard
+from gui.collapsible_card import CollapsibleSection
+from gui.scan_worker import ScanWorker
+from core.logging_config import configure_logging, safe_path
+from core.scanner import ScanService
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, initial_profile: str = "Everyday", device_mode: str = "Auto"):
         super().__init__()
         self.setWindowTitle("ShmagStick")
-        self.setMinimumSize(1140, 820)
+        self.setMinimumSize(960, 720)
 
         self.collector = get_collector()
-        self.current_profile = "Everyday"
+        self.scan_service = ScanService(lambda: self.collector)
+        self.current_profile = initial_profile
+        self.device_mode = device_mode
         self.device_type = "Desktop"
         self.metrics: dict = {}
         self.results: dict = {}
         self.is_scanning = False
+        self._deep_running = False
+        self.scan_thread = None
+        self.scan_worker = None
+        self.scanned_at = ""
+        self._sections = []
+        self.deep_sections = []
+        self._close_when_scan_finishes = False
+        self.logger = configure_logging().getChild("gui")
 
         self._build_ui()
         self.setStyleSheet(STYLESHEET)
@@ -91,8 +105,14 @@ class MainWindow(QMainWindow):
         top.addWidget(spacer)
 
         self.btn_rescan = self._action_btn("Rescan")
+        self.btn_deep = self._action_btn("Deep scan")
+        self.btn_deep.setToolTip(
+            "Slower, read-only deep scan: finds the largest files/space hogs and "
+            "surfaces threat indicators and your OS security history. Never deletes anything."
+        )
         self.btn_export = self._action_btn("Export report")
         top.addWidget(self.btn_rescan)
+        top.addWidget(self.btn_deep)
         top.addWidget(self.btn_export)
         outer.addLayout(top)
 
@@ -151,6 +171,16 @@ class MainWindow(QMainWindow):
         )
         info_layout.addWidget(self.lbl_blurb)
 
+        self.lbl_scan_status = QLabel("Ready to scan")
+        self.lbl_scan_status.setStyleSheet("color: #6E8BFF; font-size: 11px; margin-top: 6px;")
+        info_layout.addWidget(self.lbl_scan_status)
+        self.scan_progress = QProgressBar()
+        self.scan_progress.setRange(0, 100)
+        self.scan_progress.setTextVisible(False)
+        self.scan_progress.setFixedHeight(5)
+        self.scan_progress.hide()
+        info_layout.addWidget(self.scan_progress)
+
         hero_left.addLayout(info_layout)
         hero_layout.addLayout(hero_left, 0)
         hero_layout.addStretch()
@@ -169,11 +199,14 @@ class MainWindow(QMainWindow):
         )
         dev_layout.addWidget(dev_label)
 
+        self.btn_auto = self._tab_btn("Auto")
         self.btn_desktop = self._tab_btn("Desktop")
         self.btn_laptop = self._tab_btn("Laptop")
-        self.btn_desktop.setFixedWidth(144)
-        self.btn_laptop.setFixedWidth(144)
+        for button in (self.btn_auto, self.btn_desktop, self.btn_laptop):
+            button.setFixedWidth(144)
 
+        dev_layout.addWidget(self.btn_auto)
+        dev_layout.addSpacing(8)
         dev_layout.addWidget(self.btn_desktop)
         dev_layout.addSpacing(8)
         dev_layout.addWidget(self.btn_laptop)
@@ -188,7 +221,42 @@ class MainWindow(QMainWindow):
         shadow.setOffset(0, 7)
         hero.setGraphicsEffect(shadow)
 
-        # --- Cards area ---
+        # --- Technician summary ---
+        summary = QWidget()
+        summary.setObjectName("summaryPanel")
+        summary.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        summary_layout = QHBoxLayout(summary)
+        summary_layout.setContentsMargins(18, 14, 18, 14)
+        summary_layout.setSpacing(24)
+        self.lbl_actions = QLabel("Priority actions will appear after the scan.")
+        self.lbl_actions.setWordWrap(True)
+        self.lbl_actions.setTextFormat(Qt.TextFormat.PlainText)
+        self.lbl_actions.setStyleSheet("color: #C9D1E3; font-size: 12px;")
+        self.lbl_upgrades = QLabel("Upgrade guidance will appear after the scan.")
+        self.lbl_upgrades.setWordWrap(True)
+        self.lbl_upgrades.setTextFormat(Qt.TextFormat.PlainText)
+        self.lbl_upgrades.setStyleSheet("color: #C9D1E3; font-size: 12px;")
+        summary_layout.addWidget(self.lbl_actions, 1)
+        summary_layout.addWidget(self.lbl_upgrades, 1)
+        outer.addSpacing(12)
+        outer.addWidget(summary)
+
+        # --- Section toolbar (expand / collapse all) ---
+        sec_bar = QHBoxLayout()
+        sec_bar.setContentsMargins(2, 0, 2, 0)
+        sec_title = QLabel("CATEGORY DETAILS")
+        sec_title.setStyleSheet("color: #8B94A7; font-size: 11px; font-weight: bold;")
+        sec_bar.addWidget(sec_title)
+        sec_bar.addStretch()
+        self.btn_expand_all = self._action_btn("Expand all")
+        self.btn_collapse_all = self._action_btn("Collapse all")
+        sec_bar.addWidget(self.btn_expand_all)
+        sec_bar.addWidget(self.btn_collapse_all)
+        outer.addSpacing(14)
+        outer.addLayout(sec_bar)
+        outer.addSpacing(8)
+
+        # --- Sections (collapsible accordion) ---
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -198,23 +266,10 @@ class MainWindow(QMainWindow):
         scroll_content = QWidget()
         scroll_content.setObjectName("scrollContent")
         scroll_content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.cols_layout = QHBoxLayout(scroll_content)
-        self.cols_layout.setContentsMargins(0, 18, 0, 0)
-        self.cols_layout.setSpacing(16)
-        self.cols_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-
-        self.col0 = QVBoxLayout()
-        self.col1 = QVBoxLayout()
-        self.col2 = QVBoxLayout()
-        self.card_columns = (self.col0, self.col1, self.col2)
-        for col in self.card_columns:
-            col.setAlignment(Qt.AlignmentFlag.AlignTop)
-            col.setSpacing(16)
-
-        self.cols_layout.addLayout(self.col0)
-        self.cols_layout.addLayout(self.col1)
-        self.cols_layout.addLayout(self.col2)
-        self.cols_layout.addStretch(1)
+        self.sections_layout = QVBoxLayout(scroll_content)
+        self.sections_layout.setContentsMargins(0, 2, 8, 0)
+        self.sections_layout.setSpacing(9)
+        self.sections_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         scroll.setWidget(scroll_content)
         scroll.viewport().setStyleSheet("background: transparent;")
@@ -235,7 +290,7 @@ class MainWindow(QMainWindow):
         )
         footer.setObjectName("footer")
         footer.setStyleSheet(
-            "QLabel#footer { color: #5E6678; font-size: 11px; }"
+            "QLabel#footer { color: #8B94A7; font-size: 11px; }"
         )
         outer.addWidget(footer)
 
@@ -243,10 +298,14 @@ class MainWindow(QMainWindow):
         self.btn_everyday.clicked.connect(lambda: self._switch_profile("Everyday"))
         self.btn_gaming.clicked.connect(lambda: self._switch_profile("Gaming"))
         self.btn_workstation.clicked.connect(lambda: self._switch_profile("Workstation"))
+        self.btn_auto.clicked.connect(lambda: self._switch_device("Auto"))
         self.btn_desktop.clicked.connect(lambda: self._switch_device("Desktop"))
         self.btn_laptop.clicked.connect(lambda: self._switch_device("Laptop"))
         self.btn_rescan.clicked.connect(self._rescan)
+        self.btn_deep.clicked.connect(self._deep_scan)
         self.btn_export.clicked.connect(self._export)
+        self.btn_expand_all.clicked.connect(lambda: self._set_all_expanded(True))
+        self.btn_collapse_all.clicked.connect(lambda: self._set_all_expanded(False))
 
     def _tab_btn(self, text: str) -> QPushButton:
         btn = QPushButton(text)
@@ -267,42 +326,110 @@ class MainWindow(QMainWindow):
         self._do_scan()
 
     def _rescan(self):
-        self._do_scan()
+        self._do_scan(deep=False)
 
-    def _do_scan(self):
+    def _deep_scan(self):
+        self._do_scan(deep=True)
+
+    def _do_scan(self, deep: bool = False):
         if self.is_scanning:
             return
         self.is_scanning = True
-        self.btn_rescan.setText("Scanning...")
-        self.btn_rescan.setProperty("state", "scanning")
-        self.btn_rescan.style().unpolish(self.btn_rescan)
-        self.btn_rescan.style().polish(self.btn_rescan)
-        QApplication.processEvents()
-        QTimer.singleShot(50, self._collect_metrics)
+        self._deep_running = deep
 
-    def _collect_metrics(self):
-        try:
-            self.metrics = self.collector.collect()
-        except Exception as e:
-            self.metrics = {"_error": str(e)}
+        active = self.btn_deep if deep else self.btn_rescan
+        active.setText("Deep scanning..." if deep else "Scanning...")
+        active.setProperty("state", "scanning")
+        active.style().unpolish(active)
+        active.style().polish(active)
+        self.btn_rescan.setEnabled(False)
+        self.btn_deep.setEnabled(False)
+        self.btn_export.setEnabled(False)
+        self.scan_progress.setValue(0)
+        self.scan_progress.show()
+        self.lbl_scan_status.setText(
+            "Preparing deep read-only checks (this can take a minute)..." if deep
+            else "Preparing read-only checks..."
+        )
 
-        self.results = {}
-        for dev in ("Desktop", "Laptop"):
-            self.results[dev] = {}
-            for prof in ("Everyday", "Gaming", "Workstation"):
-                self.results[dev][prof] = evaluate(self.metrics.copy(), prof, dev == "Laptop")
+        self.scan_thread = QThread(self)
+        self.scan_worker = ScanWorker(self.scan_service, deep=deep)
+        self.scan_worker.moveToThread(self.scan_thread)
+        self.scan_thread.started.connect(self.scan_worker.run)
+        self.scan_worker.progress.connect(self._scan_progress)
+        self.scan_worker.finished.connect(self._scan_complete)
+        self.scan_worker.failed.connect(self._scan_failed)
+        self.scan_worker.finished.connect(self.scan_thread.quit)
+        self.scan_worker.failed.connect(self.scan_thread.quit)
+        self.scan_thread.finished.connect(self.scan_worker.deleteLater)
+        self.scan_thread.finished.connect(self.scan_thread.deleteLater)
+        self.scan_thread.finished.connect(self._scan_thread_finished)
+        self.scan_thread.start()
 
-        if self.metrics.get("is_laptop") and self.device_type == "Desktop":
-            self.device_type = "Laptop"
+    def _scan_progress(self, percent: int, label: str):
+        self.scan_progress.setValue(percent)
+        self.lbl_scan_status.setText(label)
 
-        self.is_scanning = False
-        self.btn_rescan.setText("Rescan")
-        self.btn_rescan.setProperty("state", "")
-        self.btn_rescan.style().unpolish(self.btn_rescan)
-        self.btn_rescan.style().polish(self.btn_rescan)
-
+    def _scan_complete(self, bundle):
+        self.metrics = bundle.metrics
+        self.results = bundle.results
+        self.deep_sections = list(getattr(bundle, "deep_sections", []) or [])
+        self.scanned_at = bundle.scanned_at
+        detected = "Laptop" if self.metrics.get("is_laptop") else "Desktop"
+        self.device_type = detected if self.device_mode == "Auto" else self.device_mode
+        warning_count = len(self.metrics.get("collection_warnings", []))
+        deep_note = " · deep scan results added below" if self.deep_sections else ""
+        self.lbl_scan_status.setText(
+            f"Scan complete · {warning_count} limited check{'s' if warning_count != 1 else ''}{deep_note}"
+        )
+        self._finish_scan_ui()
         self._update_subtitle()
         self._render()
+
+    def _scan_failed(self, message: str):
+        self.logger.error("Scan failed: %s", safe_path(message))
+        self.metrics = {"_error": message}
+        self.results = {}
+        self.deep_sections = []
+        self._clear_sections()
+        self.hero_gauge.setUnavailable()
+        self.lbl_grade.setText("N/A")
+        self.lbl_grade.setStyleSheet("font-size: 32px; font-weight: bold; color: #8B94A7;")
+        self.lbl_grade_label.setText("- Scan unavailable")
+        self.lbl_pname.setText("NO RELIABLE RESULT")
+        self.lbl_blurb.setText("The previous result was cleared because the rescan did not complete reliably.")
+        self.lbl_scan_status.setText("Scan unavailable — see logs for details")
+        self.lbl_actions.setText("PRIORITY ACTIONS\nThe scan could not be completed. No scores were generated.")
+        self.lbl_upgrades.setText("UPGRADE GUIDANCE\nUnavailable until a reliable scan completes.")
+        self._finish_scan_ui()
+
+    def _finish_scan_ui(self):
+        self.is_scanning = False
+        self._deep_running = False
+        for button, text in ((self.btn_rescan, "Rescan"), (self.btn_deep, "Deep scan")):
+            button.setText(text)
+            button.setProperty("state", "")
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.setEnabled(True)
+        self.btn_export.setEnabled(bool(self.results))
+        self.scan_progress.hide()
+
+    def _scan_thread_finished(self):
+        self.scan_worker = None
+        self.scan_thread = None
+        if self._close_when_scan_finishes:
+            self._close_when_scan_finishes = False
+            QTimer.singleShot(0, self.close)
+
+    def closeEvent(self, event):
+        if self.scan_thread is not None and self.scan_thread.isRunning():
+            self._close_when_scan_finishes = True
+            self.lbl_scan_status.setText("Finishing the read-only scan before closing safely...")
+            self.hide()
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _update_subtitle(self):
         machine = self.metrics.get("machine", self.collector.__class__.__name__)
@@ -315,7 +442,7 @@ class MainWindow(QMainWindow):
             is_admin = True
         admin_note = "" if is_admin else "  ·  run as admin for a deeper scan"
         self.lbl_subtitle.setText(
-            f"{machine}  ·  {os_str}  ·  detected: {self.device_type}{admin_note}"
+            f"{machine}  ·  {os_str}  ·  device: {self.device_mode} ({self.device_type}){admin_note}"
         )
 
     # ---- Render ----
@@ -325,7 +452,11 @@ class MainWindow(QMainWindow):
         self._render()
 
     def _switch_device(self, dev: str):
-        self.device_type = dev
+        self.device_mode = dev
+        if dev == "Auto":
+            self.device_type = "Laptop" if self.metrics.get("is_laptop") else "Desktop"
+        else:
+            self.device_type = dev
         self._update_device_tab_styles()
         self._render()
 
@@ -343,10 +474,11 @@ class MainWindow(QMainWindow):
 
     def _update_device_tab_styles(self):
         for btn, key in [
+            (self.btn_auto, "Auto"),
             (self.btn_desktop, "Desktop"),
             (self.btn_laptop, "Laptop"),
         ]:
-            active = key == self.device_type
+            active = key == self.device_mode
             btn.setProperty("active", "true" if active else "false")
             btn.setChecked(active)
             btn.style().unpolish(btn)
@@ -374,24 +506,70 @@ class MainWindow(QMainWindow):
         self.lbl_grade_label.setText(f"- {data['grade_label']}")
         self.lbl_pname.setText(f"{data['profile'].upper()} PROFILE")
         self.lbl_blurb.setText(data["blurb"])
+        self._render_summary(data)
 
-        for layout in self.card_columns:
-            while layout.count():
-                item = layout.takeAt(0)
-                w = item.widget()
-                if w:
-                    w.deleteLater()
+        self._clear_sections()
 
         cats = data.get("categories", [])
-        column_heights = [0 for _ in self.card_columns]
         for cat in cats:
-            card = CategoryCard(cat)
-            card.ensurePolished()
-            card.layout().activate()
+            section = CollapsibleSection(cat, expanded=False)
+            self._sections.append(section)
+            self.sections_layout.addWidget(section)
 
-            col_idx = min(range(len(self.card_columns)), key=column_heights.__getitem__)
-            self.card_columns[col_idx].addWidget(card)
-            column_heights[col_idx] += card.sizeHint().height() + self.card_columns[col_idx].spacing()
+        # Deep-scan sections (if a deep scan has been run) appear below the
+        # standard categories and start expanded so results are immediately visible.
+        if self.deep_sections:
+            header = QLabel("\U0001F52C  DEEP SCAN RESULTS")
+            header.setObjectName("deepHeader")
+            header.setStyleSheet(
+                "QLabel#deepHeader { color: #B9C6E8; font-size: 12px; font-weight: bold;"
+                " margin-top: 10px; margin-bottom: 0px; }"
+            )
+            self.sections_layout.addWidget(header)
+            for cat in self.deep_sections:
+                section = CollapsibleSection(cat, expanded=True)
+                self._sections.append(section)
+                self.sections_layout.addWidget(section)
+
+    def _render_summary(self, data: dict):
+        actions = data.get("prioritized_actions", [])[:4]
+        action_lines = ["PRIORITY ACTIONS"]
+        action_lines.extend(
+            f"{index}. [{item['severity']}] {item['category']}: {item['title']} — {item['action']}"
+            for index, item in enumerate(actions, 1)
+        )
+        if not actions:
+            action_lines.append("No urgent actions were identified by available checks.")
+        self.lbl_actions.setText("\n".join(action_lines))
+
+        upgrades = [
+            category.upgrade for category in data.get("categories", [])
+            if category.upgrade and category.upgrade.kind in ("buy", "advisory")
+        ]
+        priority_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+        upgrades.sort(key=lambda upgrade: priority_order.get(upgrade.priority, 4))
+        upgrades = upgrades[:4]
+        upgrade_lines = ["UPGRADE GUIDANCE"]
+        upgrade_lines.extend(
+            f"{upgrade.priority}: {upgrade.text} (confidence: {upgrade.compatibility_confidence})"
+            for upgrade in upgrades
+        )
+        if not upgrades:
+            upgrade_lines.append("No hardware purchase is currently justified by the evidence.")
+        self.lbl_upgrades.setText("\n".join(upgrade_lines))
+
+    def _clear_sections(self):
+        while self.sections_layout.count():
+            item = self.sections_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self._sections = []
+
+    def _set_all_expanded(self, expanded: bool):
+        for section in self._sections:
+            if isinstance(section, CollapsibleSection):
+                section.set_expanded(expanded)
 
     # ---- Export ----
     def _export(self):
@@ -399,13 +577,19 @@ class MainWindow(QMainWindow):
             return
 
         from utils.exporter import export_report
-        path = export_report(
-            self.metrics,
-            self.results,
-            self.device_type,
-            self.current_profile,
-        )
-        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        try:
+            path = export_report(
+                self.metrics,
+                self.results,
+                self.device_type,
+                self.current_profile,
+                scanned_at=self.scanned_at,
+            )
+            self.lbl_scan_status.setText(f"Report saved: {os.path.basename(path)}")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        except Exception as exc:
+            self.logger.error("Report export failed: %s", type(exc).__name__)
+            self.lbl_scan_status.setText(f"Report export failed: {type(exc).__name__}")
 
 
 def _is_windows_admin() -> bool:

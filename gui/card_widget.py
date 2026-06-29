@@ -13,6 +13,8 @@ from PyQt6.QtWidgets import (
 )
 
 from scoring.engine import _score_hex as score_hex
+from utils.shopping import ensure_amazon_affiliate_tag
+from html import escape
 
 
 CARD_WIDTH = 336
@@ -58,7 +60,10 @@ class CategoryCard(QFrame):
 
         from gui.gauge_widget import GaugeWidget
         gauge = GaugeWidget(size=78, thickness=7)
-        gauge.setScore(cat.score, animate=False)
+        if getattr(cat, "scored", True):
+            gauge.setScore(cat.score, animate=False)
+        else:
+            gauge.setUnavailable()
         hdr.addWidget(gauge, 0, Qt.AlignmentFlag.AlignTop)
 
         info = QVBoxLayout()
@@ -81,12 +86,12 @@ class CategoryCard(QFrame):
         )
         info.addWidget(stat_lbl)
 
-        word = _word_of(cat.score)
+        word = getattr(cat, "status", "") or _word_of(cat.score)
         word_lbl = QLabel(word)
         word_lbl.setObjectName("categoryWord")
         word_lbl.setStyleSheet(f"""
             QLabel#categoryWord {{
-                color: {score_hex(cat.score)};
+                color: {score_hex(cat.score) if getattr(cat, 'scored', True) else '#8B94A7'};
                 font-size: 11px;
                 font-weight: bold;
                 margin-top: 5px;
@@ -97,11 +102,20 @@ class CategoryCard(QFrame):
         hdr.addLayout(info, 1)
         main_layout.addLayout(hdr)
 
+        confidence = QLabel(f"Confidence: {getattr(cat, 'confidence', 'Medium')}")
+        confidence.setStyleSheet("color: #9AA3B5; font-size: 11px; margin-top: 8px;")
+        main_layout.addWidget(confidence)
+
         # -- Findings --
         real_findings = [f for f in cat.findings if f.severity != "Info"]
         info_findings = [f for f in cat.findings if f.severity == "Info" and f.title]
 
-        if not real_findings:
+        if not getattr(cat, "scored", True):
+            unavailable = QLabel(getattr(cat, "unavailable_reason", "This check was unavailable."))
+            unavailable.setWordWrap(True)
+            unavailable.setStyleSheet("color: #B8C0D0; font-size: 12px; margin-top: 12px;")
+            main_layout.addWidget(unavailable)
+        elif not real_findings:
             ok = QLabel("✓  No issues found — looking great.")
             ok.setStyleSheet(
                 "color: #2DD4A7; font-size: 12.5px; margin-top: 13px; margin-bottom: 2px;"
@@ -221,14 +235,16 @@ def _upgrade_section(up) -> QVBoxLayout:
     layout.addWidget(text)
 
     if up.url:
-        link = QLabel(f"<a href='{up.url}'>View on Amazon &#8594;</a>")
+        tagged_url = ensure_amazon_affiliate_tag(up.url)
+        escaped_url = escape(tagged_url, quote=True)
+        link = QLabel(f"<a href='{escaped_url}'>View on Amazon &#8594;</a>")
         link.setOpenExternalLinks(True)
         link.setStyleSheet("""
             QLabel { color: #F2C26B; font-size: 12.5px; font-weight: bold; margin-top: 7px; }
             QLabel a { color: #F2C26B; text-decoration: none; }
             QLabel a:hover { text-decoration: underline; }
         """)
-        link.setToolTip(up.url)
+        link.setToolTip(tagged_url)
         layout.addWidget(link)
 
     if up.note:

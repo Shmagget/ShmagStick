@@ -165,32 +165,14 @@ def advise(cpu_name: str, board_name: str, socket: str,
     if not inferred_socket:
         inferred_socket, confidence = infer_socket(cpu_name)
 
-    generic = _generic_rec(inferred_socket, has_dedicated_gpu) if inferred_socket else None
-    if generic and generic.rank > current_rank:
-        board_note = board_name if board_name else "unknown"
-        return {
-            "can_buy": True,
-            "text": f"Recommended {inferred_socket} CPU upgrade: {generic.name}",
-            "query": generic.search,
-            "note": (
-                f"Detected board: {board_note}. Socket/platform was {confidence}; "
-                f"exact motherboard support still depends on BIOS, so verify the vendor CPU support list before buying."
-            ),
-            "confidence": confidence,
-            "recommended": generic.name,
-            "rank": generic.rank,
-            "support_url": "",
-        }
-
     if inferred_socket:
         return {
-            "can_buy": True,
-            "text": f"Find {inferred_socket}-compatible processors",
-            "query": f"{inferred_socket} processor upgrade",
+            "can_buy": False,
+            "text": f"A {inferred_socket} CPU upgrade may be possible, but compatibility is not confirmed",
+            "query": "",
             "note": (
                 f"Detected board: {board_name or 'unknown'}. Socket/platform was {confidence}, "
-                f"but no higher-ranked specific CPU was found in the offline table. "
-                f"Confirm BIOS support before buying."
+                "but socket alone is insufficient. Check the exact motherboard support list and BIOS version before selecting a CPU."
             ),
             "confidence": confidence,
             "recommended": "",
@@ -200,9 +182,9 @@ def advise(cpu_name: str, board_name: str, socket: str,
 
     if board_name:
         return {
-            "can_buy": True,
-            "text": "Open motherboard CPU support search",
-            "query": f"{board_name} CPU support list",
+            "can_buy": False,
+            "text": "CPU compatibility requires the motherboard vendor support list",
+            "query": "",
             "note": (
                 f"Windows did not expose a reliable socket, so this uses the motherboard model: {board_name}. "
                 f"Confirm the vendor CPU support list before buying."
@@ -214,9 +196,9 @@ def advise(cpu_name: str, board_name: str, socket: str,
         }
 
     return {
-        "can_buy": True,
-        "text": "Open CPU upgrade search",
-        "query": f"{cpu_name} CPU upgrade",
+        "can_buy": False,
+        "text": "CPU upgrade compatibility could not be determined",
+        "query": "",
         "note": (
             "Windows did not expose the motherboard/socket. Use the current CPU as a starting point "
             "and confirm board/socket/BIOS support before buying."

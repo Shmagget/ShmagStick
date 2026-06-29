@@ -12,14 +12,12 @@ from pathlib import Path
 import psutil
 
 from platforms.base import MetricCollector
+from platforms.common import average_cpu_load, folder_size_gb, process_snapshot, run_command
 
 
 def _run(cmd: list[str], timeout: int = 10) -> str:
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return r.stdout if r.returncode == 0 else ""
-    except Exception:
-        return ""
+    result = run_command(cmd, timeout)
+    return result.stdout if result.ok else ""
 
 
 def _run_json(cmd: list[str]) -> dict | list:
@@ -40,43 +38,36 @@ def _try(fn, default=None):
 
 
 def _folder_gb(path: str, depth: int = 2) -> float:
-    if not path or not os.path.isdir(path):
-        return 0.0
-    total = 0
-    try:
-        for root, dirs, files in os.walk(path):
-            level = root.replace(path, "").count(os.sep)
-            if level > depth:
-                dirs[:] = []
-                continue
-            for f in files:
-                try:
-                    total += os.path.getsize(os.path.join(root, f))
-                except OSError:
-                    pass
-    except Exception:
-        pass
-    return round(total / (1024 ** 3), 2)
+    return folder_size_gb(path, depth)
+
+
+def _lscpu_fields() -> dict[str, str]:
+    data = _run_json(["lscpu", "-J"])
+    rows = data.get("lscpu", []) if isinstance(data, dict) else []
+    return {
+        str(row.get("field", "")).rstrip(":"): str(row.get("data", ""))
+        for row in rows if isinstance(row, dict)
+    }
 
 
 class LinuxCollector(MetricCollector):
-    def collect(self) -> dict:
-        m: dict = {}
-        self._machine(m)
-        self._memory(m)
-        self._storage(m)
-        self._disk(m)
-        self._cpu(m)
-        self._gpu(m)
-        self._startup(m)
-        self._background(m)
-        self._power(m)
-        self._drivers(m)
-        self._updates(m)
-        self._network(m)
-        self._stability(m)
-        self._security(m)
-        return m
+    def collect(self, progress_callback=None) -> dict:
+        return self._collect_steps([
+            ("system", "Reading machine details", self._machine),
+            ("memory", "Checking memory", self._memory),
+            ("storage", "Checking storage space", self._storage),
+            ("diskspeed", "Checking disk type and health", self._disk),
+            ("gpu", "Checking graphics", self._gpu),
+            ("cpu", "Checking processor performance", self._cpu),
+            ("startup", "Checking startup items", self._startup),
+            ("background", "Checking background services", self._background),
+            ("power", "Checking power and thermals", self._power),
+            ("drivers", "Checking devices and drivers", self._drivers),
+            ("updates", "Checking update state", self._updates),
+            ("network", "Checking network and browsers", self._network),
+            ("stability", "Checking recent stability logs", self._stability),
+            ("security", "Checking security posture", self._security),
+        ], progress_callback)
 
     def _machine(self, m: dict):
         m["machine"] = ""
@@ -86,13 +77,23 @@ class LinuxCollector(MetricCollector):
         m["cpu_socket"] = ""
         m["bios_age_days"] = None
         m["is_laptop"] = False
+        m["platform"] = "Linux"
 
-        lsb = _run_json(["lsb_release", "-a", "-j"])
-        if isinstance(lsb, dict):
-            m["os"] = f"{lsb.get('DistributorID', '')} {lsb.get('Description', '')}".strip()
-            m["os_build"] = lsb.get("Release", "")
+        try:
+            os_release = {}
+            for line in Path("/etc/os-release").read_text(encoding="utf-8", errors="ignore").splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    os_release[key] = value.strip().strip('"')
+            m["os"] = os_release.get("PRETTY_NAME", "Linux")
+            m["os_build"] = os_release.get("VERSION_ID", "")
+        except OSError:
+            pass
 
-        # Board info from dmidecode (requires root)
+        board_vendor = _run(["cat", "/sys/class/dmi/id/board_vendor"]).strip()
+        board_name = _run(["cat", "/sys/class/dmi/id/board_name"]).strip()
+        m["board_name"] = f"{board_vendor} {board_name}".strip()
+
         dmidecode = _run(["dmidecode", "-t", "baseboard"])
         if dmidecode:
             m_manufacturer = re.search(r"Manufacturer:\s*(.+)", dmidecode)
@@ -104,36 +105,28 @@ class LinuxCollector(MetricCollector):
             m["board_name"] = m["board_name"].strip()
 
         # Laptop check
-        try:
-            chassis = _run(["cat", "/sys/class/chassis/type"]).strip().lower()
-            m["is_laptop"] = chassis in ("laptop", "notebook", "portable")
-        except Exception:
-            pass
+        chassis = _run(["cat", "/sys/class/dmi/id/chassis_type"]).strip()
+        m["is_laptop"] = chassis in {"8", "9", "10", "11", "12", "14", "30", "31", "32"}
         if not m["is_laptop"]:
-            # check via systemd
-            on_ac = _run(["cat", "/sys/class/power_supply/AC/online"]).strip()
             m["is_laptop"] = bool(_run(["find", "/sys/class/power_supply", "-name", "BAT*"]))
 
         # CPU socket from lscpu
-        lscpu = _run_json(["lscpu"])
-        if isinstance(lscpu, dict):
-            m["cpu_socket"] = lscpu.get("Socket(s)", "")
+        lscpu = _lscpu_fields()
+        if lscpu:
+            m["cpu_socket_count"] = int(lscpu.get("Socket(s)", "0") or 0)
             if not m.get("cpu_name"):
                 m["cpu_name"] = lscpu.get("Model name", "")
                 m["cpu_cores"] = int(lscpu.get("Core(s) per socket", lscpu.get("CPU(s)", 0)))
                 m["cpu_threads"] = int(lscpu.get("CPU(s)", psutil.cpu_count(logical=True) or 0))
 
         # BIOS age
-        try:
-            bi = _run(["dmidecode", "-t", "bios"])
-            m_ver = re.search(r"BIOS Revision:\s*(.+)", bi)
-            if m_ver:
-                # use mtime of /var/log/dmesg as a rough proxy
-                dmesg_mtime = _try(lambda: os.path.getmtime("/var/log/dmesg"), None)
-                if dmesg_mtime:
-                    m["bios_age_days"] = int((datetime.now().timestamp() - dmesg_mtime) / 86400)
-        except Exception:
-            pass
+        bios_date = _run(["cat", "/sys/class/dmi/id/bios_date"]).strip()
+        for date_format in ("%m/%d/%Y", "%Y-%m-%d"):
+            try:
+                m["bios_age_days"] = max(0, (datetime.now() - datetime.strptime(bios_date, date_format)).days)
+                break
+            except ValueError:
+                continue
 
     # ---- Memory ----
     def _memory(self, m: dict):
@@ -144,13 +137,11 @@ class LinuxCollector(MetricCollector):
         used_virt = vm.used + psutil.swap_memory().used
         m["commit_used_pct"] = round(used_virt / total_virt * 100, 0) if total_virt else 0
 
-        procs = sorted(psutil.process_iter(["name", "memory_info"]),
-                       key=lambda p: p.info["memory_info"].rss or 0, reverse=True)[:5]
-        m["top_mem"] = ", ".join(
-            f"{p.info['name']} ({round((p.info['memory_info'].rss or 0) / 1024**3, 1)} GB)"
-            for p in procs
-        )
-        m["top_mem_gb"] = round((procs[0].info["memory_info"].rss or 0) / 1024**3, 1) if procs else 0
+        cpu_rows, memory_rows = process_snapshot()
+        m["top_cpu_rows"] = cpu_rows
+        m["top_mem_rows"] = memory_rows
+        m["top_mem"] = ", ".join(f"{name} ({value:.1f} GB)" for name, value in memory_rows)
+        m["top_mem_gb"] = memory_rows[0][1] if memory_rows else 0
 
         m["ram_slots_used"] = 0
         m["ram_slots_total"] = 0
@@ -159,22 +150,15 @@ class LinuxCollector(MetricCollector):
 
         dmidecode = _run(["dmidecode", "-t", "memory"])
         if dmidecode:
-            lines = dmidecode.splitlines()
-            current = None
-            for line in lines:
-                m_size = re.match(r"\s*Size:\s*(\d+)\s*MB", line)
-                if m_size:
-                    if int(m_size.group(1)) > 0:
-                        current = m_size.group(1)
-                        m["ram_slots_used"] = m.get("ram_slots_used", 0) + 1
-                m_dev = re.search(r"Memory Device", line)
-                if m_dev:
-                    m["ram_slots_used"] = m.get("ram_slots_used", 0) + (1 if current else 0)
-                    current = None
-                m_type = re.search(r"(DDR[0-9]+|DDR[0-9]+[A-Z]*)", line)
-                if m_type and "Type:" in line:
-                    m["ram_type"] = m_type.group(1)
-            m["ram_slots_total"] = m["ram_slots_used"]
+            devices = re.split(r"\n\s*Memory Device\s*\n", dmidecode)[1:]
+            m["ram_slots_total"] = len(devices)
+            m["ram_slots_used"] = sum(
+                1 for device in devices
+                if re.search(r"^\s*Size:\s*\d+\s*(?:MB|GB)", device, re.MULTILINE)
+            )
+            type_match = re.search(r"^\s*Type:\s*(DDR\w+)", dmidecode, re.MULTILINE)
+            if type_match:
+                m["ram_type"] = type_match.group(1)
 
     # ---- Storage ----
     def _storage(self, m: dict):
@@ -189,13 +173,13 @@ class LinuxCollector(MetricCollector):
             m["sys_free_gb"] = 0
             m["sys_free_pct"] = 100
 
-        temp_dirs = [
+        temp_dirs = list(dict.fromkeys([
             os.environ.get("TEMP", "/tmp"),
             "/tmp",
-        ]
+        ]))
         tb = sum(_folder_gb(d, 2) for d in temp_dirs if d)
         m["temp_gb"] = round(tb, 2)
-        m["recycle_gb"] = 0.0
+        m["recycle_gb"] = _folder_gb(os.path.expanduser("~/.local/share/Trash/files"), 2)
 
     # ---- Disk Speed/Health ----
     def _disk(self, m: dict):
@@ -205,14 +189,20 @@ class LinuxCollector(MetricCollector):
         m["disk_health_bad"] = []
         m["disk_busy_pct"] = 0
         m["trim_disabled"] = False
+        m["disk_type_known"] = False
+        m["system_disk_type"] = "Unknown"
+        m["disk_models"] = []
 
-        lsblk = _run_json(["lsblk", "-d", "-o", "NAME,TYPE,SIZE,ROTA,TRAN", "-J"])
+        lsblk = _run_json(["lsblk", "-d", "-o", "NAME,TYPE,SIZE,ROTA,TRAN,MODEL", "-J"])
         if isinstance(lsblk, dict) and "blockdevices" in lsblk:
             for dev in lsblk["blockdevices"]:
                 if dev.get("type") != "disk":
                     continue
                 name = dev.get("name", "")
                 rota = dev.get("rota", 1)
+                m["disk_type_known"] = True
+                if dev.get("model"):
+                    m["disk_models"].append(str(dev["model"]).strip())
                 if not rota:  # SSD
                     m["has_ssd"] = True
                 if rota:
@@ -220,7 +210,7 @@ class LinuxCollector(MetricCollector):
                     m["secondary_hdds"].append(f"/dev/{name} ({size})")
 
         # sys.is_hdd: check root device
-        root_dev = os.path.realpath("/")
+        root_disk = ""
         df = _run(["df", "-T", "-P", "/"])
         for line in df.strip().splitlines()[1:]:
             parts = line.split()
@@ -229,36 +219,50 @@ class LinuxCollector(MetricCollector):
                 dev = parts[0]
                 if fstype in ("ext4", "xfs", "btrfs", "ext3", "ext2"):
                     # check if the block device is rotational
-                    short = dev.rsplit("/", 1)[-1].rstrip("0123456789")
+                    short = _run(["lsblk", "-no", "PKNAME", dev]).strip() or dev.rsplit("/", 1)[-1]
                     rot = _run(["cat", f"/sys/block/{short}/queue/rotational"]).strip()
                     if rot == "0":
                         m["has_ssd"] = True
-                    else:
+                        m["system_disk_type"] = "NVMe/SSD" if short.startswith("nvme") else "SSD"
+                        m["disk_type_known"] = True
+                    elif rot == "1":
                         m["sys_is_hdd"] = True
+                        m["system_disk_type"] = "HDD"
+                        m["disk_type_known"] = True
+                    root_disk = f"/dev/{short}"
 
         # SMART (via smartctl)
-        smart_status = _run(["smartctl", "-H", "/dev/disk/by-id/ata-0"])
+        smart_result = run_command(["smartctl", "-H", root_disk]) if root_disk else None
+        smart_status = smart_result.stdout if smart_result and smart_result.ok else ""
         if "PASSED" in smart_status or "OK" in smart_status:
             pass
         elif "FAILED" in smart_status:
             m["disk_health_bad"].append("SMART self-assessment: FAILED")
         elif smart_status:
             m["disk_health_bad"].append("SMART check returned: unknown")
+        elif root_disk:
+            self.set_confidence(m, "diskspeed", "Low")
+            self.add_warning(
+                m,
+                "diskspeed",
+                "SMART health",
+                "SMART health was unavailable; install/configure smartctl or run with authorized elevated access.",
+                permission_related=bool(smart_result and smart_result.error == "permission denied"),
+            )
 
         # Disk busy from iostat
-        iostat = _run(["iostat", "-c", "1", "2"])
-        for line in iostat.splitlines():
-            if "idle" in line.lower():
-                parts = line.split()
+        iostat = _run(["iostat", "-dx", "1", "2"])
+        rows = [line.split() for line in iostat.splitlines() if line.strip()]
+        for parts in reversed(rows):
+            if parts and re.match(r"^(sd|nvme|vd|mmcblk)", parts[0]):
                 try:
-                    busy_pct = 100 - float(parts[-1])
-                    m["disk_busy_pct"] = int(busy_pct)
-                except (IndexError, ValueError):
+                    m["disk_busy_pct"] = int(min(100, float(parts[-1])))
+                except (ValueError, IndexError):
                     pass
                 break
 
         # TRIM support
-        trim = _run(["cat", "/sys/block/sda/queue/discard_granularity"]).strip()
+        trim = _run(["cat", f"/sys/block/{root_disk.rsplit('/', 1)[-1]}/queue/discard_granularity"]).strip() if root_disk else ""
         m["trim_disabled"] = trim == "0" if trim else False
 
     # ---- CPU ----
@@ -274,20 +278,18 @@ class LinuxCollector(MetricCollector):
         freq = psutil.cpu_freq()
         m["cpu_max_mhz"] = int(freq.max) if freq and freq.max else 0
         m["cpu_current_mhz"] = int(freq.current) if freq and freq.current else 0
-        m["cpu_load_pct"] = int(psutil.cpu_percent(interval=0.1))
+        m["cpu_load_pct"] = average_cpu_load()
         m["cpu_clock_pct"] = (
             round(m["cpu_current_mhz"] / m["cpu_max_mhz"] * 100, 0)
             if m["cpu_max_mhz"] > 0 and m["cpu_current_mhz"] > 0 else 0
         )
 
-        lscpu = _run_json(["lscpu"])
-        if isinstance(lscpu, dict):
+        lscpu = _lscpu_fields()
+        if lscpu:
             m["cpu_name"] = lscpu.get("Model name", "")
 
-        procs = sorted(psutil.process_iter(["name", "cpu_times"]),
-                       key=lambda p: (p.info["cpu_times"].user + p.info["cpu_times"].system)
-                       if p.info["cpu_times"] else 0, reverse=True)[:3]
-        m["top_cpu"] = ", ".join(sorted(set(p.info["name"] for p in procs if p.info["name"])))
+        cpu_rows = m.get("top_cpu_rows") or process_snapshot()[0]
+        m["top_cpu"] = ", ".join(f"{name} ({value:.0f}%)" for name, value in cpu_rows)
 
         m["uptime_days"] = round((datetime.now().timestamp() - psutil.boot_time()) / 86400, 1)
 
@@ -364,7 +366,7 @@ class LinuxCollector(MetricCollector):
                 name = ""
                 # Parse lspci for name
                 for pline in lspci.splitlines():
-                    if device_id in pline:
+                    if device_id.removeprefix("0x").lower() in pline.lower():
                         # format: 01:00.0 VGA [0300]: NVIDIA ...
                         parts = pline.split("]", 1)
                         if len(parts) == 2:
@@ -386,10 +388,8 @@ class LinuxCollector(MetricCollector):
                 })
                 if dedicated:
                     m["has_dedicated_gpu"] = True
-                m["gpu_idx"] = getattr(m, "gpu_idx", 0) + 1
-
                 # VRAM from sysfs
-                mem_info_path = os.path.join(device, "mem_info_vram")
+                mem_info_path = os.path.join(device, "mem_info_vram_total")
                 if os.path.isfile(mem_info_path):
                     try:
                         vram_bytes = int(open(mem_info_path).read().strip())
@@ -486,17 +486,6 @@ class LinuxCollector(MetricCollector):
             if line.strip():
                 svc_items.append(line.split()[0])
 
-        # system services (requires root)
-        try:
-            sys_out = _run(["systemctl", "list-units", "--type=service", "--state=running", "--no-pager", "--plain", "--no-legend"])
-            for line in sys_out.strip().splitlines():
-                if line.strip():
-                    parts = line.split()
-                    if parts and not parts[0].startswith("systemd-") and not parts[0].startswith("dbus-"):
-                        svc_items.append(parts[0])
-        except Exception:
-            pass
-
         m["third_party_service_count"] = len(svc_items)
         m["third_party_service_names"] = ", ".join(svc_items[:12])
 
@@ -529,6 +518,7 @@ class LinuxCollector(MetricCollector):
         m["power_saver"] = False
         m["on_battery"] = False
         m["battery_present"] = False
+        m["battery_health_pct"] = None
         m["thermal_temp_c"] = 0
 
         # Battery
@@ -536,6 +526,14 @@ class LinuxCollector(MetricCollector):
         if bat:
             m["battery_present"] = True
             m["on_battery"] = not bat.power_plugged
+            batteries = sorted(Path("/sys/class/power_supply").glob("BAT*"))
+            if batteries:
+                full = _run(["cat", str(batteries[0] / "energy_full")]).strip()
+                design = _run(["cat", str(batteries[0] / "energy_full_design")]).strip()
+                try:
+                    m["battery_health_pct"] = round(float(full) / float(design) * 100)
+                except (ValueError, ZeroDivisionError):
+                    pass
 
         # Thermal
         for zone in sorted(os.listdir("/sys/class/thermal")):
@@ -570,16 +568,14 @@ class LinuxCollector(MetricCollector):
         dmesg = _run(["dmesg", "-T", "--level=err,warn"])
         errors = []
         for line in dmesg.splitlines():
-            if "error" in line.lower() or "fail" in line.lower() or "warn" in line.lower():
+            lowered = line.lower()
+            if any(term in lowered for term in ("firmware failed", "driver failed", "hardware error", "device not ready", "i/o error")):
                 errors.append(line.strip())
         m["problem_device_count"] = len(errors[:20])
         m["problem_device_names"] = ", ".join(errors[:8])
 
-        if not errors:
-            lspci = _run(["lspci", "-k"])
-            for line in lspci.splitlines():
-                if "Kernel driver in use" in line:
-                    break
+        if not dmesg:
+            self.set_confidence(m, "drivers", "Low")
 
     # ---- Updates ----
     def _updates(self, m: dict):
@@ -588,8 +584,8 @@ class LinuxCollector(MetricCollector):
         m["update_services_stopped"] = []
 
         # Check for apt
-        if os.path.isfile("/var/lib/dpkg/last-update"):
-            mtime = _try(lambda: os.path.getmtime("/var/lib/dpkg/last-update"), None)
+        if os.path.isfile("/var/log/apt/history.log"):
+            mtime = _try(lambda: os.path.getmtime("/var/log/apt/history.log"), None)
             if mtime:
                 m["last_update_days"] = int((datetime.now().timestamp() - mtime) / 86400)
 
@@ -617,12 +613,16 @@ class LinuxCollector(MetricCollector):
 
         # Reboot pending
         m["reboot_pending"] = os.path.isfile("/var/run/reboot-required")
+        m["updates_available"] = m["last_update_days"] is not None or m["reboot_pending"]
+        if not m["updates_available"]:
+            self.set_confidence(m, "updates", "Low")
 
     # ---- Network / Browser ----
     def _network(self, m: dict):
         m["net_link_mbps"] = 0
         m["network_names"] = ""
         m["wifi_signal_pct"] = 0
+        m["dns_configured"] = False
 
         if_addrs = psutil.net_if_addrs()
         if_stats = psutil.net_if_stats()
@@ -637,6 +637,13 @@ class LinuxCollector(MetricCollector):
 
         m["net_link_mbps"] = max_link
         m["network_names"] = ", ".join(names[:5])
+        try:
+            m["dns_configured"] = any(
+                line.strip().startswith("nameserver")
+                for line in Path("/etc/resolv.conf").read_text(encoding="utf-8", errors="ignore").splitlines()
+            )
+        except OSError:
+            pass
 
         # WiFi signal
         iw = _run(["iwconfig"])
@@ -654,46 +661,6 @@ class LinuxCollector(MetricCollector):
     def _scan_browsers(self, m: dict):
         m["browser_ext_count"] = 0
         m["browser_cache_gb"] = 0.0
-        doc_ext = re.compile(r"\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|rtf|jpg|jpeg|png|gif|zip|rar|csv|htm|html)$", re.IGNORECASE)
-        exe_ext = re.compile(r"\.(exe|scr|com|pif|bat|cmd|vbs|js|jse|wsf|ps1)$", re.IGNORECASE)
-        double_ext = re.compile(r"\.(?:pdf|doc|docx|xls|xlsx|ppt|pptx|txt|rtf|jpg|jpeg|png|gif|zip|rar|csv)\.(?:exe|scr|com|pif|bat|cmd|vbs|js|jse|wsf|ps1)$", re.IGNORECASE)
-
-        sus_list = []
-
-        scan_dirs = [
-            os.path.expanduser("~/Downloads"),
-            os.path.expandvars("$TEMP"),
-            os.path.expandvars("$TMP"),
-            os.path.expanduser("~/Desktop"),
-        ]
-        if "XDG_CONFIG_HOME" in os.environ:
-            scan_dirs.append(os.path.expandvars("$XDG_CONFIG_HOME/autostart"))
-
-        for d in scan_dirs:
-            if not d or not os.path.isdir(d):
-                continue
-            is_startup = "autostart" in d
-            try:
-                for f in os.listdir(d):
-                    fp = os.path.join(d, f)
-                    if not os.path.isfile(fp):
-                        continue
-                    if not exe_ext.search(f):
-                        continue
-                    reasons = []
-                    if double_ext.search(f):
-                        reasons.append("disguised double extension")
-                    if is_startup:
-                        reasons.append("script/executable in autostart")
-                    if reasons:
-                        sus_list.append(f"{fp} [{'; '.join(reasons)}]")
-            except OSError:
-                pass
-
-        m["suspicious_count"] = len(sus_list)
-        m["suspicious_list"] = sus_list[:12]
-        m["hosts_custom_entries"] = 0
-
         # Browser detection
         config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
         browser_roots = {
@@ -718,7 +685,7 @@ class LinuxCollector(MetricCollector):
             if not os.path.isdir(root):
                 continue
             for pdir in os.listdir(root):
-                if pdir == "Default" or re.match(r"^Profile \d+$", pdir):
+                if pdir == "Default" or re.match(r"^Profile \d+$", pdir) or ".default" in pdir:
                     p0 = os.path.join(root, pdir)
                     ext_path = os.path.join(p0, "Extensions")
                     if os.path.isdir(ext_path):
@@ -772,42 +739,42 @@ class LinuxCollector(MetricCollector):
         m["system_error_count"] = sys_errors
         m["disk_event_count"] = disk_ev
         m["whea_event_count"] = whea
-        m["bug_check_count"] = _run(["journalctl", "--since", since, "|", "grep", "-c", "panic"]).strip().count("\n")
-        m["app_crash_count"] = _run([
+        panic_log = _run(["journalctl", "--since", since, "-k", "-g", "panic|oops", "--no-pager", "-q"])
+        m["bug_check_count"] = len([line for line in panic_log.splitlines() if line.strip()])
+        crash_log = _run([
             "journalctl", "--since", since, "-p", "err",
             "-g", "segfault|abort|crash", "--no-pager", "-q"
-        ]).strip().count("\n")
+        ])
+        m["app_crash_count"] = len([line for line in crash_log.splitlines() if line.strip()])
+        if not journal:
+            self.set_confidence(m, "stability", "Low")
 
     # ---- Security ----
     def _security(self, m: dict):
-        m["av_enabled"] = True
-        m["realtime_protection"] = True
-        m["defs_age_days"] = 0
+        m["av_enabled"] = None
+        m["realtime_protection"] = None
+        m["defs_age_days"] = None
+        m["firewall_enabled"] = None
         m["suspicious_count"] = 0
         m["suspicious_list"] = []
         m["hosts_custom_entries"] = 0
 
         # ClamAV?
         clamscan = _run(["which", "clamscan"])
-        if not clamscan.strip():
-            m["av_enabled"] = False
+        if clamscan.strip():
+            m["av_enabled"] = True
 
         # Firewall: ufw/firewalld/nftables
         ufw = _run(["ufw", "status"])
-        if "inactive" in ufw.lower() and "active" not in ufw.lower():
-            pass  # ufw present but not active
-
-        # Suspicious files in /tmp and ~/Downloads
-        doc_ext = re.compile(r"\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|rtf)$", re.IGNORECASE)
-        exe_ext = re.compile(r"\.(exe|scr|com|pif|bat|cmd|vbs|js|jse|wsf|ps1|elf|so|dll)$", re.IGNORECASE)
-        double_ext = re.compile(
-            r"\.(?:pdf|doc|docx|xls|xlsx|ppt|pptx|txt|rtf|jpg|jpeg|png|gif|zip|rar|csv)"
-            r"\.(?:exe|scr|com|pif|bat|cmd|vjs|jse|wsf|elf|sh)$",
-            re.IGNORECASE,
-        )
+        if ufw:
+            m["firewall_enabled"] = "status: active" in ufw.lower()
+        else:
+            firewalld = _run(["firewall-cmd", "--state"])
+            if firewalld:
+                m["firewall_enabled"] = "running" in firewalld.lower()
 
         sus = []
-        for scan_dir in ["/tmp", os.path.expanduser("~/Downloads"), os.path.expanduser("~/Desktop")]:
+        for scan_dir in [os.path.expanduser("~/.config/autostart")]:
             if not os.path.isdir(scan_dir):
                 continue
             try:
@@ -815,15 +782,12 @@ class LinuxCollector(MetricCollector):
                     fp = os.path.join(scan_dir, f)
                     if not os.path.isfile(fp):
                         continue
-                    if not exe_ext.search(f):
-                        continue
-                    reasons = []
-                    if double_ext.search(f):
-                        reasons.append("disguised double extension")
-                    if reasons:
-                        sus.append(f"{fp} [{'; '.join(reasons)}]")
+                    if f.lower().endswith((".sh", ".py", ".desktop")) and os.access(fp, os.X_OK):
+                        sus.append(f"{f} [executable startup item; review publisher and command]")
             except (OSError, PermissionError):
                 pass
 
         m["suspicious_count"] = len(sus)
         m["suspicious_list"] = sus[:12]
+        if m["av_enabled"] is None:
+            self.set_confidence(m, "security", "Low")

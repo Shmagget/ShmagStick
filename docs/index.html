@@ -3,77 +3,208 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ShmagStick — Free PC Health Scanner & Upgrade Advisor</title>
-<meta name="description" content="ShmagStick is a free Windows desktop tool that scans your PC, scores 13 areas of its health, and recommends the best upgrade to fix each one.">
+<title>ShmagStick: Free PC Health Scanner and Upgrade Advisor</title>
+<meta name="description" content="ShmagStick is a read-only cross-platform health checker that explains performance problems and gives compatibility-conscious upgrade guidance. Free downloads for Windows, macOS and Linux.">
+<link rel="icon" href="logo.svg">
 <style>
-  :root{--bg:#0d0f14;--card:#1b2030;--line:#2a3145;--txt:#e8edf6;--mut:#8b95ab;--g:#22d39a;--gold:#ffc857;--accent:#4ea1ff}
+  :root{
+    --bg:#0b0d12;--card:#161a23;--card2:#12151d;--line:#262b38;--line2:#1f2430;
+    --txt:#edf0f6;--mut:#8b94a7;--accent:#6e8bff;--green:#2dd4a7;--gold:#f2c26b;
+  }
   *{box-sizing:border-box}
   body{margin:0;font-family:'Segoe UI',system-ui,Arial,sans-serif;color:var(--txt);
-       background:radial-gradient(1100px 600px at 70% -10%,#1c2336 0%,var(--bg) 55%)}
-  .wrap{max-width:1000px;margin:0 auto;padding:40px 22px 70px}
-  header{text-align:center;margin-bottom:8px}
-  .logo{font-size:13px;letter-spacing:4px;color:var(--mut);text-transform:uppercase}
-  h1{font-size:44px;margin:6px 0 10px}
-  .tag{color:var(--mut);font-size:18px;max-width:640px;margin:0 auto;line-height:1.5}
-  .cta{display:inline-block;margin:22px 8px 0;padding:13px 26px;border-radius:11px;font-weight:700;
-       font-size:15px;text-decoration:none;cursor:pointer}
-  .cta.primary{background:var(--g);color:#08110d}
-  .cta.ghost{background:#1e2740;color:#cfe0ff;border:1px solid #33406a}
-  .shot{display:block;width:100%;max-width:920px;margin:34px auto 0;border-radius:16px;
-        border:1px solid var(--line);box-shadow:0 14px 50px rgba(0,0,0,.45)}
-  h2{font-size:24px;margin:54px 0 16px;text-align:center}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
-  .card h3{margin:0 0 6px;font-size:17px}
-  .card p{margin:0;color:var(--mut);font-size:14px;line-height:1.5}
-  ol.steps{max-width:680px;margin:0 auto;padding-left:22px;color:var(--mut);font-size:15px;line-height:1.9}
+       background:radial-gradient(1100px 620px at 72% -8%,#1a2133 0%,var(--bg) 56%);line-height:1.5}
+  .wrap{max-width:1040px;margin:0 auto;padding:38px 22px 72px}
+  a{color:var(--gold);text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  header{text-align:center;margin-bottom:10px}
+  .brand{display:flex;align-items:center;justify-content:center;gap:14px}
+  .brand img{width:62px;height:62px;image-rendering:pixelated;
+             filter:drop-shadow(0 4px 14px rgba(0,0,0,.5))}
+  .kicker{font-size:12px;letter-spacing:4px;color:var(--mut);text-transform:uppercase}
+  h1{font-size:46px;margin:4px 0 12px;letter-spacing:-.5px}
+  .tag{color:var(--mut);font-size:18px;max-width:660px;margin:0 auto;line-height:1.55}
+
+  /* --- Download buttons --- */
+  .downloads{display:flex;flex-wrap:wrap;gap:16px;justify-content:center;margin:30px auto 6px}
+  .dl{display:flex;align-items:center;gap:14px;min-width:236px;padding:16px 20px;
+      background:linear-gradient(180deg,#1a1f2b,#141821);border:1px solid var(--line);
+      border-radius:14px;color:var(--txt);transition:border-color .15s,transform .15s,background .15s}
+  .dl:hover{border-color:var(--accent);transform:translateY(-2px);background:linear-gradient(180deg,#1e2433,#161b25);text-decoration:none}
+  .dl .os{flex:0 0 auto;width:34px;height:34px;display:flex;align-items:center;justify-content:center}
+  .dl .meta{flex:1 1 auto;text-align:left;line-height:1.25}
+  .dl .meta .big{font-size:16px;font-weight:700}
+  .dl .meta .small{font-size:12px;color:var(--mut)}
+  .dl .arrow{flex:0 0 auto;color:var(--green)}
+  .subnote{color:var(--mut);font-size:13px;text-align:center;margin:14px auto 0;max-width:640px}
+  .ghostrow{text-align:center;margin-top:18px}
+  .ghost{display:inline-block;padding:10px 20px;border-radius:10px;background:#181c26;
+         border:1px solid #2c3346;color:#c7d2ea;font-size:14px;font-weight:600}
+  .ghost:hover{border-color:#3a4358;text-decoration:none}
+
+  .shot{display:block;width:100%;max-width:940px;margin:36px auto 0;border-radius:16px;
+        border:1px solid var(--line);box-shadow:0 16px 54px rgba(0,0,0,.5)}
+
+  h2{font-size:25px;margin:58px 0 18px;text-align:center}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+  .card .head{display:flex;align-items:center;gap:11px;margin-bottom:7px}
+  .card .ic{flex:0 0 auto;width:24px;height:24px;color:var(--accent)}
+  .card h3{margin:0;font-size:16px}
+  .card p{margin:0;color:var(--mut);font-size:13.5px;line-height:1.5}
+
+  .feature{display:flex;gap:16px;align-items:flex-start;max-width:760px;margin:0 auto 14px;
+           background:var(--card2);border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+  .feature .ic{flex:0 0 auto;width:28px;height:28px;color:var(--green);margin-top:2px}
+  .feature h3{margin:0 0 5px;font-size:17px}
+  .feature p{margin:0;color:var(--mut);font-size:14px}
+
+  ol.steps{max-width:700px;margin:0 auto;padding-left:22px;color:var(--mut);font-size:15px;line-height:1.85}
   ol.steps b{color:var(--txt)}
-  .note{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;
-        color:var(--mut);font-size:13px;line-height:1.6;margin-top:40px}
-  footer{text-align:center;color:#5e6678;font-size:12px;margin-top:40px;line-height:1.8}
-  a{color:var(--gold)}
+
+  .note{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:16px 18px;
+        color:var(--mut);font-size:13px;line-height:1.6;margin:42px auto 0;max-width:840px}
+  footer{text-align:center;color:#5e6678;font-size:12.5px;margin-top:40px;line-height:1.9}
+  .sep{display:inline-block;width:4px;height:4px;border-radius:50%;background:#3a4150;
+       margin:0 9px;vertical-align:middle}
+  @media(max-width:520px){h1{font-size:36px}.dl{min-width:100%}}
 </style>
 </head>
 <body>
 <div class="wrap">
+
   <header>
-    <div class="logo">System Health Scanner</div>
-    <h1>ShmagStick</h1>
-    <p class="tag">A free, cross-platform tool (Windows, macOS &amp; Linux) that scans your PC like an OBD2 scanner
-       for cars — it scores 13 areas of your computer's health and tells you the best upgrade to make each one faster.</p>
-    <a class="cta primary" href="https://github.com/Shmagget/ShmagStick">Download on GitHub</a>
-    <a class="cta ghost" href="https://github.com/Shmagget/ShmagStick/archive/refs/heads/main.zip">Get the ZIP</a>
-    <img class="shot" src="screenshot.png" alt="ShmagStick dashboard showing 13 health gauges">
+    <div class="brand">
+      <img src="logo.svg" alt="ShmagStick logo">
+      <div>
+        <div class="kicker">System Health Scanner</div>
+        <h1 style="margin:0">ShmagStick</h1>
+      </div>
+    </div>
+    <p class="tag">A free, cross-platform tool for Windows, macOS and Linux that scans your PC the way an
+       OBD2 reader scans a car. It scores 13 areas of your computer's health and tells you the single best
+       upgrade to make each one faster. It only reads; it never changes anything.</p>
+
+    <!-- Download buttons: each links straight to the matching file in the latest release. -->
+    <div class="downloads">
+      <a class="dl" href="https://github.com/Shmagget/ShmagStick/releases/latest/download/ShmagStick-Windows.exe" download>
+        <span class="os">
+          <svg width="30" height="30" viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="#4ea1ff" d="M3 5.4 10.4 4.3v7.2H3V5.4zM3 18.6 10.4 12.5v7.2L3 18.6zM11.4 4.1 21 3v8.5h-9.6V4.1zM11.4 12.5H21V21l-9.6-1.1v-7.4z"/>
+          </svg>
+        </span>
+        <span class="meta"><span class="big">Windows</span><br><span class="small">64-bit .exe, no install</span></span>
+        <span class="arrow">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 11l5 5 5-5M5 21h14"/></svg>
+        </span>
+      </a>
+
+      <a class="dl" href="https://github.com/Shmagget/ShmagStick/releases/latest/download/ShmagStick-macOS-AppleSilicon.zip" download>
+        <span class="os">
+          <svg width="28" height="28" viewBox="0 0 384 512" aria-hidden="true">
+            <path fill="#e8edf6" d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C73.2 141.6 24 184.6 24 268c0 24.6 4.5 50 13.5 76.3 12 34.6 55.3 119.4 100.5 118 23.6-.6 40.3-16.8 71-16.8 29.8 0 45.3 16.8 71.5 16.8 45.6-.7 84.8-77.8 96.2-112.5-61.2-28.9-58-84.6-58-81.1zM254.5 84.6c24.8-29.4 22.6-56.2 21.9-65.8-21.9 1.3-47.2 14.9-61.7 31.7-16 18-25.4 40.3-23.4 64.4 23.7 1.8 45.4-10.4 63.2-30.3z"/>
+          </svg>
+        </span>
+        <span class="meta"><span class="big">macOS</span><br><span class="small">Apple Silicon (M1 to M4)</span></span>
+        <span class="arrow">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 11l5 5 5-5M5 21h14"/></svg>
+        </span>
+      </a>
+
+      <a class="dl" href="https://github.com/Shmagget/ShmagStick/releases/latest/download/ShmagStick-Linux" download>
+        <span class="os">
+          <svg width="30" height="30" viewBox="0 0 64 64" aria-hidden="true">
+            <path fill="#111418" d="M32 5c-7.5 0-11 5.6-11 13 0 4.6-2.8 7.5-4.7 11.2C13.5 34.7 11 38.5 11 44c0 7.4 9.4 11 21 11s21-3.6 21-11c0-5.5-2.5-9.3-5.3-14.8C44.8 25.5 42 22.6 42 18c0-7.4-2.5-13-10-13z"/>
+            <ellipse cx="32" cy="40" rx="12" ry="14.5" fill="#fff"/>
+            <ellipse cx="27" cy="20" rx="3.1" ry="4" fill="#fff"/>
+            <ellipse cx="37" cy="20" rx="3.1" ry="4" fill="#fff"/>
+            <circle cx="28" cy="21" r="1.6" fill="#111418"/>
+            <circle cx="36" cy="21" r="1.6" fill="#111418"/>
+            <path fill="#f7a80d" d="M29 24h6l-3 4.6z"/>
+            <ellipse cx="24" cy="57" rx="6" ry="3" fill="#f7a80d"/>
+            <ellipse cx="40" cy="57" rx="6" ry="3" fill="#f7a80d"/>
+          </svg>
+        </span>
+        <span class="meta"><span class="big">Linux</span><br><span class="small">64-bit portable binary</span></span>
+        <span class="arrow">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 11l5 5 5-5M5 21h14"/></svg>
+        </span>
+      </a>
+    </div>
+
+    <p class="subnote">Each button downloads the latest version for that system. The builds are unsigned, so
+       your operating system may warn you the first time you run one; that is normal for independent software.
+       Intel Macs can <a href="https://github.com/Shmagget/ShmagStick#build-your-own-executable">run from source</a>.</p>
+
+    <div class="ghostrow">
+      <a class="ghost" href="https://github.com/Shmagget/ShmagStick">View the source on GitHub</a>
+    </div>
+
+    <img class="shot" src="screenshot.png" alt="ShmagStick dashboard showing the health score for each category">
   </header>
 
   <h2>What it checks</h2>
   <div class="grid">
-    <div class="card"><h3>🧠 Memory (RAM)</h3><p>Total RAM vs. how you use the PC, plus live memory and commit pressure.</p></div>
-    <div class="card"><h3>💾 Storage Space</h3><p>Free space on your system drive and how much junk is clogging it.</p></div>
-    <div class="card"><h3>⚡ Disk Speed &amp; Health</h3><p>HDD vs SSD on the boot drive, SMART health, and TRIM.</p></div>
-    <div class="card"><h3>🔥 CPU</h3><p>Cores, live load, clock behavior, and a motherboard-compatible upgrade pick.</p></div>
-    <div class="card"><h3>🎮 Graphics (GPU)</h3><p>Dedicated vs integrated, VRAM, and graphics-driver age.</p></div>
-    <div class="card"><h3>🚀 Startup &amp; Boot</h3><p>How many programs launch at boot and drag down your login time.</p></div>
-    <div class="card"><h3>⚙️ Background Apps</h3><p>Third-party services and scheduled tasks running in the background.</p></div>
-    <div class="card"><h3>🌡️ Power &amp; Thermals</h3><p>Power plan, battery state, and heat/throttling when Windows exposes it.</p></div>
-    <div class="card"><h3>🔧 Drivers &amp; Devices</h3><p>Device Manager errors, old key drivers, and BIOS age.</p></div>
-    <div class="card"><h3>🔄 Windows Updates</h3><p>Pending restarts and how far behind Windows Update is.</p></div>
-    <div class="card"><h3>🌐 Network &amp; Browser</h3><p>Link speed, Wi-Fi signal, browser extensions and cache size.</p></div>
-    <div class="card"><h3>📈 Stability Logs</h3><p>Recent disk, hardware (WHEA), blue-screen, and app-crash events.</p></div>
-    <div class="card"><h3>🛡️ Security &amp; Malware</h3><p>Antivirus status plus a scan for suspicious files in risky locations.</p></div>
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="10" rx="1.5"/><path d="M7 7V4M11 7V4M13 7V4M17 7V4M7 20v-3M11 20v-3M13 20v-3M17 20v-3"/></svg></span><h3>Memory (RAM)</h3></div><p>Total RAM versus how you use the PC, plus live memory and commit pressure.</p></div>
+
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></span><h3>Storage Space</h3></div><p>Free space on your system drive and how much junk is clogging it.</p></div>
+
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></span><h3>Disk Speed and Health</h3></div><p>HDD versus SSD on the boot drive, SMART health, and TRIM.</p></div>
+
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1.5"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9 6V3M15 6V3M9 21v-3M15 21v-3M6 9H3M6 15H3M21 9h-3M21 15h-3"/></svg></span><h3>CPU</h3></div><p>Cores, live load, clock behavior, and a motherboard-compatible upgrade pick.</p></div>
+
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="11" rx="2"/><circle cx="9" cy="12.5" r="2.6"/><circle cx="15.5" cy="12.5" r="2.6"/></svg></span><h3>Graphics (GPU)</h3></div><p>Dedicated versus integrated, VRAM, and graphics-driver age.</p></div>
+
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v8"/><path d="M7.5 6.3a7 7 0 1 0 9 0"/></svg></span><h3>Startup and Boot</h3></div><p>How many programs launch at boot and drag down your login time.</p></div>
+
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.1 5.1l2.1 2.1M16.8 16.8l2.1 2.1M18.9 5.1 16.8 7.2M7.2 16.8 5.1 18.9"/></svg></span><h3>Background Apps</h3></div><p>Third-party services and scheduled tasks running in the background.</p></div>
+
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 14.8V5a2 2 0 0 0-4 0v9.8a4 4 0 1 0 4 0z"/></svg></span><h3>Power and Thermals</h3></div><p>Power plan, battery state, and heat or throttling when the OS exposes it.</p></div>
+
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7.5a4.5 4.5 0 0 1-6 4.2l-7.8 7.9a2 2 0 0 1-2.8-2.8l7.9-7.8A4.5 4.5 0 0 1 16.9 3.2L14.3 5.8l1.8 1.8 2.6-2.6A4.5 4.5 0 0 1 21 7.5z"/></svg></span><h3>Drivers and Devices</h3></div><p>Device errors, old key drivers, and BIOS or firmware age.</p></div>
+
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 0 1 13.3-6M20 5v5h-5"/><path d="M20 12a8 8 0 0 1-13.3 6M4 19v-5h5"/></svg></span><h3>Operating System Updates</h3></div><p>Pending restarts and available operating-system update evidence.</p></div>
+
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 3.8 5.6 3.8 9S14.5 18.5 12 21c-2.5-2.5-3.8-5.6-3.8-9S9.5 5.5 12 3z"/></svg></span><h3>Network and Browser</h3></div><p>Link speed, Wi-Fi signal, browser extensions and cache size.</p></div>
+
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5v14h16"/><path d="M7 15l3.5-4 3 2 4.5-6"/></svg></span><h3>Stability Logs</h3></div><p>Recent disk, hardware, blue-screen or kernel-panic, and app-crash events.</p></div>
+
+    <div class="card"><div class="head"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg></span><h3>Security Indicators</h3></div><p>Native protection, firewall state, and suspicious startup-item indicators.</p></div>
+  </div>
+
+  <h2>Now with a Deep Scan</h2>
+  <div class="feature">
+    <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M11 8v6M8 11h6"/></svg></span>
+    <div>
+      <h3>Find what is slowing you down</h3>
+      <p>The optional Deep Scan goes further: it finds the largest files and folders eating your space,
+         flags programs running from unusual locations, and on Windows it surfaces the threat history your
+         own security software has already recorded. It is a read-only helper, not antivirus; it never opens,
+         quarantines, or deletes anything.</p>
+    </div>
+  </div>
+  <div class="feature">
+    <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+    <div>
+      <h3>Tidy, collapsible results</h3>
+      <p>Every category shows its score at a glance. Click any row to expand exactly what is wrong with that
+         part of your computer, or expand and collapse everything at once.</p>
+    </div>
   </div>
 
   <h2>How it works</h2>
   <ol class="steps">
-    <li><b>Scan.</b> Run ShmagStick — it reads your PC's vitals in a few seconds. It only diagnoses; it never changes anything.</li>
-    <li><b>Score.</b> Each area gets a 0–100 grade, tuned to your device type (desktop or laptop) and whether you use the PC for everyday tasks, gaming, or a workstation.</li>
-    <li><b>Upgrade.</b> For each area scoring below 85, it suggests the best part for <i>your</i> hardware — and never recommends a desktop graphics card or a CPU swap on a laptop — then links you straight to it.</li>
+    <li><b>Scan.</b> Run ShmagStick and it reads your PC's vitals in a few seconds. It only diagnoses; it never changes anything.</li>
+    <li><b>Score.</b> Each area gets a 0 to 100 grade, tuned to your device type (desktop or laptop) and whether you use the PC for everyday tasks, gaming, or as a workstation.</li>
+    <li><b>Upgrade.</b> It explains practical upgrade targets, the confidence level, and what to verify before buying. Fixed laptop and Apple Silicon parts are called out explicitly.</li>
   </ol>
 
   <h2>Recommended upgrades</h2>
-  <p style="text-align:center;color:var(--mut);max-width:640px;margin:0 auto;font-size:15px;line-height:1.6">
-     When a section scores below 85 and a part can fix it — more RAM, an SSD, a graphics card — ShmagStick points you
-     to the best-rated option that fits your machine.</p>
+  <p style="text-align:center;color:var(--mut);max-width:660px;margin:0 auto;font-size:15px;line-height:1.6">
+     When a section scores below 85 and a part can fix it, such as more RAM, an SSD, or a graphics card,
+     ShmagStick points you to a safe target and a compatibility checklist. Specific CPU purchases are shown
+     only when motherboard compatibility is reasonably established.</p>
 
   <div class="note">
     <b>Affiliate disclosure:</b> some of the "suggested upgrade" links on this site and in the app are affiliate
@@ -82,8 +213,13 @@
   </div>
 
   <footer>
-    ShmagStick is free and open source · <a href="https://github.com/Shmagget/ShmagStick">github.com/Shmagget/ShmagStick</a><br>
-    © 2026 Shmagget · MIT License
+    ShmagStick is free and open source
+    <span class="sep"></span>
+    <a href="https://github.com/Shmagget/ShmagStick">github.com/Shmagget/ShmagStick</a>
+    <br>
+    Copyright 2026 Shmagget
+    <span class="sep"></span>
+    MIT License
   </footer>
 </div>
 </body>

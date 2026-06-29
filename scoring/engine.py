@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from .profiles import get as get_profile
 from .cpu_advisor import advise as cpu_advise
+from .upgrades import enrich_upgrade
 from utils.shopping import shop
+from core.models import CategoryResult, CategoryStatus, grade_for_score
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +58,7 @@ def _score_memory(m: dict, p) -> tuple[int, list, object]:
         )
         f.append(_nf(sev,
             f"Only {m['ram_total_gb']} GB RAM (this profile expects {p.ram_target_gb} GB+)",
-            "Too little memory forces Windows to swap to disk, causing stutter and slow app switching.",
+            "Too little memory forces the system to swap to disk, causing stutter and slow app switching.",
             f"Upgrade to at least {p.ram_target_gb} GB RAM - the single biggest real-world speed gain."))
 
     # RAM usage
@@ -103,12 +105,16 @@ def _score_memory(m: dict, p) -> tuple[int, list, object]:
     )
     if m.get("ram_total_gb", 0) < p.ram_target_gb:
         fw = "SO-DIMM laptop" if ram_form == "laptop" else "DIMM desktop"
-        ram_kind = ram_type if ram_type and ram_type != "RAM" else "DDR4"
+        ram_kind = ram_type if ram_type and ram_type != "RAM" else "computer"
         form_q = "laptop SO-DIMM" if ram_form == "laptop" else "desktop DIMM"
+        compatible_url = shop(f"{ram_kind} {form_q} memory {p.ram_target_gb}GB") if ram_type != "RAM" else ""
         up = _upgrade("buy",
             f"Add memory to reach {p.ram_target_gb} GB ({ram_type}, {fw})",
-            url=shop(f"{ram_kind} {form_q} memory {p.ram_target_gb}GB"),
+            url=compatible_url,
             note=slot_note)
+        if m.get("memory_upgradable") is False:
+            up = _upgrade("advisory", "Internal memory is fixed on this model",
+                note="Reduce concurrent workloads or consider replacement if memory remains the bottleneck.")
     else:
         up = _upgrade("ok", "RAM is sufficient for this profile.", note=slot_note)
 
@@ -134,19 +140,19 @@ def _score_storage(m: dict, p) -> tuple[int, list, object]:
     if sys_free_pct < 10:
         s -= 45
         f.append(_nf("Critical", f"System drive almost full ({sys_free_pct}% free)",
-            f"{sys_free_gb} GB free of {sys_size_gb} GB. Windows slows badly below ~10% free.",
-            "Free up space: Disk Cleanup, uninstall unused apps, move files off C:."))
+            f"{sys_free_gb} GB free of {sys_size_gb} GB. Operating systems slow down when free space is exhausted.",
+            "Remove unused apps and caches, or move personal files to another drive."))
     elif sys_free_pct < p.free_pct_target:
         s -= 20
         f.append(_nf("Medium", f"System drive low on space ({sys_free_pct}% free)",
             f"{sys_free_gb} GB free. This profile wants {p.free_pct_target}%+ headroom.",
-            "Clear space to give Windows breathing room."))
+            "Clear space to give the operating system breathing room."))
 
     temp_gb = m.get("temp_gb", 0)
     if temp_gb >= 2:
         s -= 15
         f.append(_nf("Medium", f"{temp_gb} GB of temp/junk files",
-            "Temp folders are bloated.", "Run Disk Cleanup (cleanmgr) or the Cleanup launcher."))
+            "Temp folders are bloated.", "Use the operating system's storage cleanup tool after reviewing what it will remove."))
     elif temp_gb >= 1:
         s -= 8
         f.append(_nf("Low", f"{temp_gb} GB of temp files",
@@ -199,9 +205,9 @@ def _score_diskspeed(m: dict, p) -> tuple[int, list, object]:
     if sys_is_hdd:
         s -= p.hdd_sys_penalty
         sev = "Critical" if p.hdd_sys_penalty >= 70 else "High"
-        f.append(_nf(sev, "Windows runs on a mechanical hard drive (HDD)",
+        f.append(_nf(sev, "The operating system runs on a mechanical hard drive (HDD)",
             "Spinning drives are 5-10x slower than SSDs - throttling boot, app launches and load times.",
-            "Clone Windows onto an SSD. For this profile it's essential."))
+            "Migrate the operating system to an SSD. For this profile it is essential."))
     elif has_ssd:
         f.append(_nf("Info", "System drive is a solid-state drive (SSD)",
             "Fast storage for the OS.", ""))
@@ -216,17 +222,18 @@ def _score_diskspeed(m: dict, p) -> tuple[int, list, object]:
             f.append(_nf("Low", f"Secondary drive is mechanical: {h}",
                 "Fine for bulk storage.", "Only matters if you run programs from it."))
 
-    disk_busy = m.get("disk_busy_pct", 0)
+    disk_busy = m.get("disk_busy_pct")
+    disk_busy = disk_busy if isinstance(disk_busy, (int, float)) else 0
     if disk_busy >= 90:
         s -= 20
         f.append(_nf("High", f"Disk is saturated right now ({disk_busy}% busy)",
             "A pegged disk makes the whole PC feel frozen.",
-            "Open Task Manager -> Processes and sort by Disk to find the culprit."))
+            "Use the operating system's process monitor to identify the disk-heavy process."))
     elif disk_busy >= 70:
         s -= 10
         f.append(_nf("Medium", f"Disk is busy right now ({disk_busy}%)",
             "Heavy background disk activity can cause stutter.",
-            "Wait for updates/indexing to finish or check Task Manager for disk-heavy apps."))
+            "Wait for updates/indexing to finish or inspect disk-heavy processes."))
 
     if m.get("trim_disabled") and has_ssd:
         s -= 10
@@ -235,11 +242,11 @@ def _score_diskspeed(m: dict, p) -> tuple[int, list, object]:
             "Run an elevated prompt and check fsutil behavior query DisableDeleteNotify; enable TRIM if appropriate."))
 
     score = _clamp(s)
-    dstat = "Boot drive: HDD (slow)" if sys_is_hdd else ("Boot drive: SSD" if has_ssd else "Boot drive: unknown")
+    dstat = f"Boot drive: {m.get('system_disk_type', 'Unknown')}"
     if sys_is_hdd:
         up = _upgrade("buy", "Replace the boot drive with an SSD",
-            url=shop("2.5 inch SATA SSD 1TB" if is_laptop else "NVMe M.2 SSD 1TB"),
-            note="A 2.5\" SATA SSD fits almost any PC/laptop. Desktops with an M.2 slot can use a faster NVMe SSD for similar money.")
+            url=shop("internal SSD 1TB"),
+            note="Verify whether the computer accepts 2.5-inch SATA, M.2 SATA, or M.2 NVMe before buying.")
     elif secondary_hdds and p.hdd_sec_penalty > 0:
         up = _upgrade("buy", "Add an SSD for your active games/projects",
             url=shop("NVMe M.2 SSD 2TB"),
@@ -273,7 +280,7 @@ def _score_cpu(m: dict, p) -> tuple[int, list, object]:
         s -= 15
         f.append(_nf("High", f"CPU heavily loaded right now ({cpu_load}%)",
             f"Sustained load. Top processes: {m.get('top_cpu', 'N/A')}",
-            f"Check Task Manager; close/investigate {m.get('top_cpu', 'N/A')} if unexpected."))
+            f"Close or investigate {m.get('top_cpu', 'N/A')} if the load is unexpected."))
     elif cpu_load >= 70:
         s -= 8
         f.append(_nf("Low", f"CPU busy ({cpu_load}%)",
@@ -333,13 +340,23 @@ def _score_gpu(m: dict, p) -> tuple[int, list, object]:
     if not gpus:
         s -= 30
         f.append(_nf("High", "No graphics controller detected",
-            "Windows did not report a GPU/display controller.",
+            "The operating system did not report a GPU/display controller.",
             "Install chipset/graphics drivers from the PC or GPU maker."))
 
     has_dgpu = m.get("has_dedicated_gpu", False)
     is_laptop = m.get("is_laptop", False)
 
-    if p.need_gpu and not has_dgpu:
+    apple_silicon = bool(m.get("apple_silicon"))
+    if p.need_gpu and not has_dgpu and apple_silicon:
+        if m.get("ram_total_gb", 0) < 16:
+            s -= 20
+            f.append(_nf("Medium", "Apple unified graphics has limited memory headroom",
+                "GPU and CPU share unified memory; demanding games may be constrained on lower-memory models.",
+                "Lower resolution and quality settings, or consider a newer Mac for substantially more GPU performance."))
+        else:
+            f.append(_nf("Info", "Apple unified graphics detected",
+                "Graphics performance depends on the exact Apple chip and application support.", ""))
+    elif p.need_gpu and not has_dgpu:
         if is_laptop:
             s -= 30
             f.append(_nf("High", "Integrated graphics only (laptop)",
@@ -371,8 +388,8 @@ def _score_gpu(m: dict, p) -> tuple[int, list, object]:
     if m.get("gpu_problem_count", 0) > 0:
         s -= 25
         f.append(_nf("High", f"{m['gpu_problem_count']} GPU device problem(s)",
-            "Device Manager reports an error for a graphics device.",
-            "Open Device Manager and repair/reinstall the graphics driver."))
+            "The operating system reports an error for a graphics device.",
+            "Review the hardware report and repair or reinstall the graphics driver."))
 
     if gpus:
         gpu_rank = m.get("gpu_rank", 0)
@@ -381,7 +398,10 @@ def _score_gpu(m: dict, p) -> tuple[int, list, object]:
             f"Detected VRAM: {m.get('vram_gb', '?')} GB{rank_str}", ""))
 
     score = _clamp(s)
-    if p.need_gpu and not has_dgpu:
+    if p.need_gpu and not has_dgpu and apple_silicon:
+        up = _upgrade("advisory", "Apple Silicon graphics is fixed",
+            note="Internal GPU upgrades and eGPUs are not supported on Apple Silicon. Lower settings or replace the Mac if GPU performance is the primary bottleneck.")
+    elif p.need_gpu and not has_dgpu:
         if is_laptop:
             up = _upgrade("advisory", "A laptop can't take a desktop graphics card",
                 note="Laptop graphics are built in and not replaceable. For more GPU power, pick a laptop with a dedicated GPU, or use an external GPU (eGPU) enclosure over Thunderbolt/USB4.")
@@ -424,7 +444,7 @@ def _score_startup(m: dict, p) -> tuple[int, list, object]:
         sev = "High" if over >= 5 else "Medium"
         f.append(_nf("High" if over >= 5 else "Medium", f"{count} programs launch at boot",
             f"Background autostarts slow login and eat RAM/CPU: {m.get('startup_names', 'N/A')}",
-            "Task Manager -> Startup tab -> disable what you don't need at boot."))
+            "Review startup or login-item settings and disable only items you recognize as unnecessary."))
 
     uptime_days = m.get("uptime_days", 0)
     if uptime_days >= 14:
@@ -470,7 +490,7 @@ def _score_background(m: dict, p) -> tuple[int, list, object]:
         s -= 18
         f.append(_nf("High", f"{tasks} non-Microsoft scheduled tasks",
             "Scheduled updaters and helpers can wake the PC and run in bursts.",
-            "Open Task Scheduler and disable tasks you recognize as unnecessary."))
+            "Review scheduled tasks and disable only confirmed nonessential items."))
     elif tasks > p.task_threshold:
         s -= 9
         f.append(_nf("Medium", f"{tasks} non-Microsoft scheduled tasks",
@@ -533,7 +553,7 @@ def _score_power(m: dict, p) -> tuple[int, list, object]:
 
     if not f:
         plan = m.get("power_plan", "Unknown")
-        therm = f"Thermal zone max: {temp} C" if temp else "No thermal sensor exposed by Windows."
+        therm = f"Thermal zone max: {temp} C" if temp else "No reliable thermal sensor was exposed."
         f.append(_nf("Info", f"Power plan: {plan}", therm, ""))
 
     if temp >= 80:
@@ -561,7 +581,7 @@ def _score_drivers(m: dict, p) -> tuple[int, list, object]:
     if prob > 0:
         s -= min(45, 15 * prob)
         f.append(_nf("High", f"{prob} device problem(s)",
-            f"Device Manager is reporting errors: {m.get('problem_device_names', 'N/A')}",
+            f"The operating system is reporting device errors: {m.get('problem_device_names', 'N/A')}",
             "Install/reinstall drivers from the PC, motherboard, or device maker."))
 
     old = m.get("old_driver_count", 0)
@@ -585,7 +605,7 @@ def _score_drivers(m: dict, p) -> tuple[int, list, object]:
 
     if not f:
         f.append(_nf("Info", "No obvious device/driver problems found",
-            "Device Manager errors and very old key drivers were not detected.", ""))
+            "Device errors and very old key drivers were not detected by available checks.", ""))
 
     up = _upgrade("free",
         "Update drivers and BIOS from vendor support pages before buying hardware.",
@@ -614,35 +634,35 @@ def _score_updates(m: dict, p) -> tuple[int, list, object]:
     last_days = m.get("last_update_days")
     if last_days is None:
         s -= 8
-        f.append(_nf("Low", "Last successful Windows update unknown",
-            "Windows did not report a recent successful update time.",
-            "Open Windows Update and check for updates."))
+        f.append(_nf("Low", "Last successful operating-system update unknown",
+            "The operating system did not report a reliable recent update time.",
+            "Open the operating system's update settings and check for updates."))
     elif last_days > 120:
         s -= 28
-        f.append(_nf("High", f"Windows updates are {last_days} days behind",
+        f.append(_nf("High", f"Operating-system updates are {last_days} days behind",
             "Very stale updates can mean missing performance, security, and driver fixes.",
-            "Run Windows Update until fully current."))
+            "Install supported operating-system updates until fully current."))
     elif last_days > p.update_days_threshold:
         s -= 12
-        f.append(_nf("Medium", f"Windows updates are {last_days} days behind",
+        f.append(_nf("Medium", f"Operating-system updates are {last_days} days behind",
             "The PC may be missing cumulative fixes and drivers.",
-            "Run Windows Update."))
+            "Run the operating system's update tool."))
 
     stopped = m.get("update_services_stopped", [])
     if stopped:
         s -= 18
         f.append(_nf("High", f"Update service(s) stopped: {', '.join(stopped)}",
-            "Windows Update/BITS being stopped can block fixes and driver delivery.",
-            "Set Windows Update and BITS back to their normal startup behavior."))
+            "Disabled update services can block fixes and driver delivery.",
+            "Restore the services to their normal vendor-recommended startup behavior."))
 
     if not f:
         ts = f"Last successful install: {last_days} days ago." if last_days is not None else ""
-        f.append(_nf("Info", "Windows update state looks normal", ts, ""))
+        f.append(_nf("Info", "Operating-system update state looks normal", ts, ""))
 
-    up = _upgrade("free", "No purchase needed - restart and run Windows Update.")
+    up = _upgrade("free", "No purchase needed - restart and run the operating-system update tool.")
     from platforms.base import CategoryResult
     cat = CategoryResult(
-        key="updates", name="Windows Updates", icon="\U0001F504",
+        key="updates", name="Operating System Updates", icon="\U0001F504",
         score=_clamp(s), weight=p.weights["updates"],
         stat=(f"Updated {last_days}d ago" if last_days is not None else "Update age unknown"),
         findings=f, upgrade=up if _clamp(s) < 85 else None,
@@ -722,13 +742,13 @@ def _score_stability(m: dict, p) -> tuple[int, list, object]:
     if whea > 0:
         s -= 25
         f.append(_nf("High", f"{whea} hardware error(s) in 7 days",
-            "WHEA errors can point to CPU/RAM/PCIe instability, heat, or overclocking problems.",
+            "Hardware error logs can point to CPU/RAM/PCIe instability, heat, or overclocking problems.",
             "Remove overclocks, check thermals, update BIOS/chipset, and test RAM."))
 
     bsod = m.get("bug_check_count", 0)
     if bsod > 0:
         s -= 25
-        f.append(_nf("High", f"{bsod} blue-screen event(s) in 7 days",
+        f.append(_nf("High", f"{bsod} system crash or kernel panic event(s) in 7 days",
             "Crashes can leave the PC unstable and often trace back to drivers/hardware.",
             "Update drivers and review Reliability Monitor."))
 
@@ -748,7 +768,7 @@ def _score_stability(m: dict, p) -> tuple[int, list, object]:
 
     if not f:
         f.append(_nf("Info", "No major recent stability signals",
-            "No recent disk, WHEA, blue-screen, or heavy app-crash pattern was detected.", ""))
+            "No recent disk, hardware, system-crash, or heavy app-crash pattern was detected.", ""))
 
     up = _upgrade("free",
         "No purchase first - back up, update drivers, remove overclocks, and inspect Reliability Monitor.")
@@ -765,35 +785,60 @@ def _score_stability(m: dict, p) -> tuple[int, list, object]:
 def _score_security(m: dict, p) -> tuple[int, list, object]:
     s = 100
     f: list = []
+    unknown_checks: list[str] = []
 
-    if not m.get("av_enabled", True):
+    av_enabled = m.get("av_enabled")
+    if av_enabled is False:
         s -= 50
         f.append(_nf("Critical", "Antivirus appears disabled",
             "No active virus protection detected.",
-            "Turn on Windows Security or install a reputable AV now."))
+            "Enable the operating system's native protection or a reputable security product."))
+    elif av_enabled is None:
+        unknown_checks.append("antivirus/native malware protection")
 
-    if not m.get("realtime_protection", True):
+    realtime = m.get("realtime_protection")
+    if realtime is False:
         s -= 20
         f.append(_nf("High", "Real-time protection is off",
             "Threats can run before any scan catches them.",
-            "Enable real-time protection in Windows Security."))
+            "Enable real-time protection in the installed security product."))
+    elif realtime is None:
+        unknown_checks.append("real-time protection")
 
-    defs_age = m.get("defs_age_days", 0)
-    if defs_age > 30:
+    defs_age = m.get("defs_age_days")
+    if isinstance(defs_age, (int, float)) and defs_age > 30:
         s -= 25 if defs_age > 7 else p.defs_low_penalty
         sev = "High" if defs_age > 30 else "Medium"
         f.append(_nf(sev, f"Virus definitions {defs_age} days old",
             "Outdated signatures." if defs_age <= 30 else "Badly outdated; misses new threats.",
-            "Update definitions (Virus & threat protection)."))
+            "Update the security product's definitions."))
+    elif defs_age is None:
+        unknown_checks.append("definition age")
+
+    firewall = m.get("firewall_enabled")
+    if firewall is False:
+        s -= 15
+        f.append(_nf("Medium", "Host firewall appears disabled",
+            "A disabled firewall increases exposure on untrusted networks.",
+            "Enable the operating system firewall unless another managed firewall replaces it."))
+    elif firewall is None:
+        unknown_checks.append("firewall status")
+
+    gatekeeper = m.get("gatekeeper_enabled")
+    if gatekeeper is False:
+        s -= 15
+        f.append(_nf("Medium", "macOS Gatekeeper appears disabled",
+            "Gatekeeper helps block untrusted or improperly signed applications.",
+            "Review Gatekeeper settings in Privacy & Security."))
 
     sus = m.get("suspicious_count", 0)
     if sus > 0:
         s -= min(50, sus * 10)
         items = m.get("suspicious_list", [])
         review = " || ".join(str(x) for x in items[:5])
-        f.append(_nf("High", f"{sus} suspicious file(s) in high-risk locations",
+        f.append(_nf("High", f"{sus} suspicious startup item(s)",
             f"Review: {review}",
-            "Don't run them. Right-click -> Scan with Windows Security or check virustotal.com."))
+            "Do not run unknown items; scan them with the installed security product or ask a technician to verify the publisher."))
 
     hosts = m.get("hosts_custom_entries", 0)
     if hosts > 0:
@@ -802,19 +847,26 @@ def _score_security(m: dict, p) -> tuple[int, list, object]:
             "Malware sometimes edits this to hijack sites.",
             "Review the hosts file; remove unknown lines."))
 
-    if not f:
+    if unknown_checks:
+        f.append(_nf("Info", "Some security checks were unavailable",
+            "Unavailable: " + ", ".join(unknown_checks) + ".",
+            "Run with elevated permissions or check the operating system's security dashboard manually."))
+    elif not f:
         f.append(_nf("Info", "No obvious security problems found",
-            "Defender active, definitions current, no flagged files.", ""))
+            "Available native protection, firewall, and startup-risk checks did not flag a problem.", ""))
 
     up = _upgrade("free",
-        "No purchase needed - update Defender and remove flagged files (all free).")
+        "No purchase needed - enable native protections and review flagged startup items.")
     from platforms.base import CategoryResult
     cat = CategoryResult(
-        key="security", name="Security & Malware", icon="\U0001F6E1",
+        key="security", name="Security & Malware Indicators", icon="\U0001F6E1",
         score=_clamp(s), weight=p.weights["security"],
-        stat=("No threats flagged" if not sus else f"{sus} files flagged"),
+        stat=(f"{sus} startup items flagged" if sus else
+              ("Protection status partially unavailable" if unknown_checks else "No indicators flagged")),
         findings=f, upgrade=up if _clamp(s) < 85 else None,
     )
+    if unknown_checks:
+        cat.confidence = "Low"
     return _clamp(s), f, cat
 
 
@@ -823,54 +875,101 @@ def _score_security(m: dict, p) -> tuple[int, list, object]:
 # ---------------------------------------------------------------------------
 
 def evaluate(metrics: dict, profile_key: str, is_laptop: bool) -> dict:
-    """Run all 13 category scorers and return a ScanResult-ready dict."""
+    """Score available evidence without treating missing probes as healthy."""
     p = get_profile(profile_key)
-    rows = []
     m = metrics
+    m["is_laptop"] = is_laptop
 
-    # CPU upgrade advice needs to be pre-computed by the platform layer,
-    # but we handle it here as a fallback.
-    if "cpu_upgrade" not in m:
-        board = m.get("board_name", "")
-        socket = m.get("cpu_socket", "")
-        m["cpu_upgrade"] = cpu_advise(
-            m.get("cpu_name", ""), board, socket,
-            m.get("has_dedicated_gpu", False), is_laptop,
-        )
+    # Device choice and GPU presence affect CPU practicality, so advice is
+    # recomputed after collection instead of trusting an early collector value.
+    m["cpu_upgrade"] = cpu_advise(
+        m.get("cpu_name", ""),
+        m.get("board_name", ""),
+        m.get("cpu_socket", ""),
+        m.get("has_dedicated_gpu", False),
+        is_laptop,
+    )
 
     scorers = [
-        _score_memory, _score_storage, _score_diskspeed,
-        _score_cpu, _score_gpu, _score_startup, _score_background,
-        _score_power, _score_drivers, _score_updates,
-        _score_network, _score_stability, _score_security,
+        ("memory", _score_memory), ("storage", _score_storage),
+        ("diskspeed", _score_diskspeed), ("cpu", _score_cpu),
+        ("gpu", _score_gpu), ("startup", _score_startup),
+        ("background", _score_background), ("power", _score_power),
+        ("drivers", _score_drivers), ("updates", _score_updates),
+        ("network", _score_network), ("stability", _score_stability),
+        ("security", _score_security),
     ]
+    availability = m.get("category_availability") or {}
+    cats: list[CategoryResult] = []
+    weighted_score = 0.0
+    available_weight = 0.0
 
-    cats = []
-    wsum = wnum = 0.0
-    minc = 100
+    for key, scorer in scorers:
+        state = availability.get(key, {})
+        if not state and not _has_category_evidence(key, m):
+            state = {
+                "available": False,
+                "reason": "No reliable evidence was supplied for this category.",
+                "confidence": "Unavailable",
+            }
+        if state.get("available") is False:
+            cat = _unavailable_category(key, p, state.get("reason") or "This check was unavailable.")
+        else:
+            try:
+                _, _, cat = scorer(m, p)
+            except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+                reason = f"Required evidence was unavailable ({type(exc).__name__})."
+                cat = _unavailable_category(key, p, reason)
+                m.setdefault("collection_warnings", []).append({
+                    "category": key,
+                    "operation": "Scoring",
+                    "message": reason,
+                    "permission_related": False,
+                })
 
-    for fn in scorers:
-        sc, findings, cat = fn(m, p)
+        cat.confidence = state.get("confidence", cat.confidence)
+        cat.finalize()
+        enrich_upgrade(cat, m, p)
         cats.append(cat)
-        wsum += p.weights[cat.key]
-        wnum += sc * p.weights[cat.key]
-        if sc < minc:
-            minc = sc
+        if cat.scored:
+            available_weight += cat.weight
+            weighted_score += cat.score * cat.weight
 
-    wavg = wnum / wsum if wsum > 0 else 0
-    overall = _clamp(round(0.7 * wavg + 0.3 * minc))
+    scored_categories = [category for category in cats if category.scored]
+    if scored_categories and available_weight:
+        minimum = min(category.score for category in scored_categories)
+        weighted_average = weighted_score / available_weight
+        # The worst category deliberately carries 30% of the result. Additional
+        # caps keep a severe fault from being hidden by many healthy categories.
+        overall = _clamp(0.7 * weighted_average + 0.3 * minimum)
+        if any(category.status == CategoryStatus.CRITICAL.value for category in scored_categories):
+            overall = min(overall, 59)
+        elif minimum < 55:
+            overall = min(overall, 69)
+        if any(category.confidence == "Low" for category in scored_categories):
+            overall = min(overall, 89)
+        grade = grade_for_score(overall)
+        grade_label = {
+            "A": "Excellent", "B": "Good", "C": "Fair",
+            "D": "Poor", "F": "Needs serious work",
+        }[grade]
+    else:
+        overall = 0
+        grade = "N/A"
+        grade_label = "Unavailable"
 
-    grade = (
-        "A" if overall >= 90 else
-        "B" if overall >= 80 else
-        "C" if overall >= 70 else
-        "D" if overall >= 55 else
-        "F"
-    )
-    grade_label = {
-        "A": "Excellent", "B": "Good", "C": "Fair",
-        "D": "Poor", "F": "Needs serious work",
-    }[grade]
+    severity_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
+    prioritized_actions = []
+    for category in cats:
+        for finding in category.findings:
+            if finding.action and finding.severity != "Info":
+                prioritized_actions.append({
+                    "category": category.name,
+                    "severity": finding.severity,
+                    "title": finding.title,
+                    "action": finding.action,
+                })
+    prioritized_actions.sort(key=lambda item: severity_order.get(item["severity"], 5))
 
     return {
         "profile": p.name,
@@ -879,4 +978,66 @@ def evaluate(metrics: dict, profile_key: str, is_laptop: bool) -> dict:
         "grade": grade,
         "grade_label": grade_label,
         "categories": cats,
+        "prioritized_actions": prioritized_actions,
+        "upgrades": [category.upgrade for category in cats if category.upgrade],
+        "unavailable_checks": [category.name for category in cats if not category.scored],
     }
+
+
+_CATEGORY_META = {
+    "memory": ("Memory (RAM)", "🧠"),
+    "storage": ("Storage Space", "💾"),
+    "diskspeed": ("Disk Speed & Health", "⚡"),
+    "cpu": ("CPU", "🔥"),
+    "gpu": ("Graphics (GPU)", "🎮"),
+    "startup": ("Startup & Boot", "🚀"),
+    "background": ("Background Apps", "⚙"),
+    "power": ("Power & Thermals", "🌡"),
+    "drivers": ("Drivers & Devices", "🔧"),
+    "updates": ("Operating System Updates", "🔄"),
+    "network": ("Network & Browser", "🌐"),
+    "stability": ("Stability Logs", "📈"),
+    "security": ("Security & Malware Indicators", "🛡"),
+}
+
+
+def _unavailable_category(key: str, profile, reason: str) -> CategoryResult:
+    name, icon = _CATEGORY_META[key]
+    return CategoryResult(
+        key=key,
+        name=name,
+        icon=icon,
+        score=0,
+        weight=profile.weights[key],
+        stat="Unavailable",
+        findings=[_nf("Info", "Check unavailable", reason, "Run with elevated permissions or install the optional system utility if appropriate.")],
+        status="Unavailable",
+        grade="N/A",
+        reason=reason,
+        evidence=["No reliable evidence was returned."],
+        recommendations=["Review the unavailable reason and retry if deeper diagnostics are required."],
+        confidence="Unavailable",
+        unavailable_reason=reason,
+        scored=False,
+    )
+
+
+_EVIDENCE_KEYS = {
+    "memory": ("ram_total_gb",),
+    "storage": ("sys_size_gb",),
+    "diskspeed": ("disk_type_known",),
+    "cpu": ("cpu_cores",),
+    "gpu": ("gpus",),
+    "startup": ("startup_count",),
+    "background": ("third_party_service_count", "scheduled_task_count"),
+    "power": ("power_plan", "battery_present", "thermal_temp_c"),
+    "drivers": ("problem_device_count", "old_driver_count"),
+    "updates": ("last_update_days", "reboot_pending"),
+    "network": ("network_names", "net_link_mbps"),
+    "stability": ("system_error_count", "app_crash_count"),
+    "security": ("av_enabled", "firewall_enabled", "suspicious_count"),
+}
+
+
+def _has_category_evidence(key: str, metrics: dict) -> bool:
+    return any(evidence_key in metrics for evidence_key in _EVIDENCE_KEYS[key])

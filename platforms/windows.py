@@ -13,6 +13,7 @@ from pathlib import Path
 import psutil
 
 from platforms.base import MetricCollector
+from platforms.common import average_cpu_load, folder_size_gb, process_snapshot
 
 
 def _try(fn, default=None):
@@ -55,24 +56,7 @@ def _normalize_hw(value: str) -> str:
 
 
 def _folder_gb(path: str, depth: int = 2) -> float:
-    if not path or not os.path.isdir(path):
-        return 0.0
-    total = 0
-    try:
-        for root, dirs, files in os.walk(path):
-            level = root.replace(path, "").count(os.sep)
-            if level > depth:
-                dirs[:] = []
-                continue
-            for f in files:
-                fp = os.path.join(root, f)
-                try:
-                    total += os.path.getsize(fp)
-                except OSError:
-                    pass
-    except Exception:
-        pass
-    return round(total / (1024 ** 3), 2)
+    return folder_size_gb(path, depth)
 
 
 def _link_speed_mbps(bits) -> int:
@@ -81,24 +65,50 @@ def _link_speed_mbps(bits) -> int:
     return int(round(float(bits) / 1_000_000))
 
 
+def _authenticode_status(path: str) -> str:
+    try:
+        result = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "& { param($p) (Get-AuthenticodeSignature -LiteralPath $p).Status.ToString() }",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            creationflags=0x08000000,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _is_third_party_service_path(path: str) -> bool:
+    if not path:
+        return False
+    normalized = os.path.expandvars(path).replace("/", "\\").lower()
+    native_markers = ("\\windows\\", "%systemroot%", "\\system32\\", "\\syswow64\\")
+    return not any(marker in normalized for marker in native_markers)
+
+
 class WindowsCollector(MetricCollector):
-    def collect(self) -> dict:
-        m: dict = {}
-        self._machine(m)
-        self._memory(m)
-        self._storage(m)
-        self._disk(m)
-        self._cpu(m)
-        self._gpu(m)
-        self._startup(m)
-        self._background(m)
-        self._power(m)
-        self._drivers(m)
-        self._updates(m)
-        self._network(m)
-        self._stability(m)
-        self._security(m)
-        return m
+    def collect(self, progress_callback=None) -> dict:
+        return self._collect_steps([
+            ("system", "Reading machine details", self._machine),
+            ("memory", "Checking memory", self._memory),
+            ("storage", "Checking storage space", self._storage),
+            ("diskspeed", "Checking disk type and health", self._disk),
+            ("gpu", "Checking graphics", self._gpu),
+            ("cpu", "Checking processor performance", self._cpu),
+            ("startup", "Checking startup items", self._startup),
+            ("background", "Checking background services", self._background),
+            ("power", "Checking power and thermals", self._power),
+            ("drivers", "Checking devices and drivers", self._drivers),
+            ("updates", "Checking update state", self._updates),
+            ("network", "Checking network and browsers", self._network),
+            ("stability", "Checking recent stability logs", self._stability),
+            ("security", "Checking security posture", self._security),
+        ], progress_callback)
 
     # ---- Machine / Board / BIOS ----
     def _machine(self, m: dict):
@@ -110,6 +120,7 @@ class WindowsCollector(MetricCollector):
         m["cpu_socket"] = ""
         m["bios_age_days"] = None
         m["is_laptop"] = False
+        m["platform"] = "Windows"
 
         # Use ctypes for OS version (more reliable than wmi on some systems)
         try:
@@ -158,14 +169,11 @@ class WindowsCollector(MetricCollector):
         used_virt = vm.used + psutil.swap_memory().used
         m["commit_used_pct"] = round(used_virt / total_virt * 100, 0) if total_virt else 0
 
-        # Top memory users
-        procs = sorted(psutil.process_iter(["name", "memory_info"]),
-                       key=lambda p: p.info["memory_info"].rss or 0, reverse=True)[:5]
-        m["top_mem"] = ", ".join(
-            f"{p.info['name']} ({round((p.info['memory_info'].rss or 0) / (1024**3), 1)} GB)"
-            for p in procs
-        )
-        m["top_mem_gb"] = round((procs[0].info["memory_info"].rss or 0) / (1024**3), 1) if procs else 0
+        cpu_rows, memory_rows = process_snapshot()
+        m["top_cpu_rows"] = cpu_rows
+        m["top_mem_rows"] = memory_rows
+        m["top_mem"] = ", ".join(f"{name} ({value:.1f} GB)" for name, value in memory_rows)
+        m["top_mem_gb"] = memory_rows[0][1] if memory_rows else 0
 
         # RAM slots
         m["ram_slots_used"] = 0
@@ -235,6 +243,9 @@ class WindowsCollector(MetricCollector):
         m["disk_health_bad"] = []
         m["disk_busy_pct"] = 0
         m["trim_disabled"] = False
+        m["disk_type_known"] = False
+        m["system_disk_type"] = "Unknown"
+        m["disk_models"] = []
 
         # SSD vs HDD + SMART health via the Storage namespace (Windows 8+).
         # Win32_PhysicalDisk does NOT exist in root\cimv2 — the physical-disk
@@ -260,12 +271,17 @@ class WindowsCollector(MetricCollector):
                 media = int(pd.MediaType or 0)      # 3=HDD, 4=SSD, 5=SCM
                 health = int(pd.HealthStatus or 0)  # 0=Healthy, 1=Warning, 2=Unhealthy
                 name = pd.FriendlyName or "Disk"
+                m["disk_models"].append(name)
                 size_gb = round(int(pd.Size or 0) / (1024 ** 3)) if pd.Size else "?"
+                if media in (3, 4, 5):
+                    m["disk_type_known"] = True
                 if media == 4:
                     m["has_ssd"] = True
-                if health != 0:
+                if health in (1, 2):
                     label = {1: "Warning", 2: "Unhealthy"}.get(health, "Unknown")
                     m["disk_health_bad"].append(f"{name} [{label}]")
+                elif health not in (0,):
+                    self.set_confidence(m, "diskspeed", "Low")
                 if media == 3:  # mechanical hard drive
                     try:
                         is_sys = (sys_disk_num is not None and int(pd.DeviceId) == sys_disk_num)
@@ -273,8 +289,15 @@ class WindowsCollector(MetricCollector):
                         is_sys = False
                     if is_sys:
                         m["sys_is_hdd"] = True
+                        m["system_disk_type"] = "HDD"
                     else:
                         m["secondary_hdds"].append(f"{name} ({size_gb} GB)")
+                elif media in (4, 5) and sys_disk_num is not None:
+                    try:
+                        if int(pd.DeviceId) == sys_disk_num:
+                            m["system_disk_type"] = "NVMe/SSD" if media == 4 else "Solid-state storage"
+                    except (TypeError, ValueError):
+                        pass
         except Exception:
             pass
 
@@ -305,7 +328,7 @@ class WindowsCollector(MetricCollector):
         freq = _try(lambda: psutil.cpu_freq(), None)
         max_mhz = int(freq.max) if freq and freq.max else 0
         cur_mhz = int(freq.current) if freq and freq.current else 0
-        load = _try(lambda: psutil.cpu_percent(interval=0.1), 0)
+        load = _try(average_cpu_load, 0)
         clock_pct = round(cur_mhz / max_mhz * 100, 0) if max_mhz > 0 and cur_mhz > 0 else 0
 
         m["cpu_cores"] = cpu_info
@@ -320,11 +343,9 @@ class WindowsCollector(MetricCollector):
         m["cpu_rank_name"] = ""
         m["cpu_upgrade"] = {}
 
-        # Top CPU-time processes
-        procs = sorted(psutil.process_iter(["name", "cpu_times"]),
-                       key=lambda p: (p.info["cpu_times"].user + p.info["cpu_times"].system) if p.info["cpu_times"] else 0,
-                       reverse=True)[:3]
-        m["top_cpu"] = ", ".join(sorted(set(p.info["name"] for p in procs if p.info["name"])))
+        cpu_rows = m.get("top_cpu_rows") or process_snapshot(5)[0]
+        m["top_cpu_rows"] = cpu_rows
+        m["top_cpu"] = ", ".join(f"{name} ({value:.0f}%)" for name, value in cpu_rows[:5])
 
         uptime = time.time() - psutil.boot_time()
         m["uptime_days"] = round(uptime / 86400, 1)
@@ -342,6 +363,8 @@ class WindowsCollector(MetricCollector):
                 "cpu_socket": str(row.get("SocketDesignation") or ""),
             })
         ))
+        if m["cpu_max_mhz"] > 0 and m["cpu_current_mhz"] > 0:
+            m["cpu_clock_pct"] = round(m["cpu_current_mhz"] / m["cpu_max_mhz"] * 100)
 
         # CPU rank lookup
         cpu_name = m.get("cpu_name", "")
@@ -406,16 +429,18 @@ class WindowsCollector(MetricCollector):
                     continue
                 name = g.Name.strip()
                 m["gpus"].append(name)
+                adapter_ram = int(g.AdapterRAM or 0)
+                vram_gb = round(adapter_ram / (1024**3), 1) if adapter_ram < 4_000_000_000 else 0
                 m["gpu_details"].append({
                     "name": name,
                     "dedicated": bool(re.search(r"NVIDIA|GeForce|RTX|GTX|Radeon RX|Radeon Pro|Quadro|Arc A|Arc B|Intel\(R\) Arc", name)),
-                    "vram_gb": round(int(g.AdapterRAM or 0) / (1024**3), 1),
+                    "vram_gb": vram_gb,
                     "driver_version": g.DriverVersion or "",
                     "driver_age_days": _age_days(g.DriverDate),
                 })
                 if re.search(r"NVIDIA|GeForce|RTX|GTX|Radeon RX|Radeon Pro|Quadro|Arc A|Arc B", name):
                     m["has_dedicated_gpu"] = True
-                vram = round(int(g.AdapterRAM or 0) / (1024**3), 1)
+                vram = vram_gb
                 if vram > m["vram_gb"]:
                     m["vram_gb"] = vram
                 age = _age_days(g.DriverDate) or 0
@@ -430,6 +455,16 @@ class WindowsCollector(MetricCollector):
                 sensors = psutil.sensors_temperatures()
             except Exception:
                 pass
+
+        try:
+            query = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=6, creationflags=0x08000000,
+            )
+            if query.returncode == 0 and query.stdout.strip():
+                m["vram_gb"] = max(float(row.strip()) / 1024 for row in query.stdout.splitlines() if row.strip())
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
 
         # GPU rank
         if m["gpus"]:
@@ -455,7 +490,7 @@ class WindowsCollector(MetricCollector):
                     winreg.HKEY_LOCAL_MACHINE if "LOCAL_MACHINE" in hive else winreg.HKEY_CURRENT_USER
                 ))
                 parts = hive.split("\\")
-                key = winreg.OpenKey(reg, "\\".join(parts[2:]))
+                key = winreg.OpenKey(reg, "\\".join(parts[1:]))
                 i = 0
                 while True:
                     try:
@@ -487,8 +522,7 @@ class WindowsCollector(MetricCollector):
                 info = svc.as_dict()
                 if (info.get("start_type") == "automatic" and
                     info.get("status") == "running" and
-                    info.get("binpath") and
-                    "\\Windows\\" not in (info.get("binpath") or "")):
+                    _is_third_party_service_path(info.get("binpath") or "")):
                     svc_names.append(info.get("display_name") or info.get("name", ""))
         except Exception:
             pass
@@ -529,6 +563,7 @@ class WindowsCollector(MetricCollector):
         m["power_saver"] = False
         m["on_battery"] = False
         m["battery_present"] = False
+        m["battery_health_pct"] = None
         m["thermal_temp_c"] = 0
 
         try:
@@ -549,6 +584,18 @@ class WindowsCollector(MetricCollector):
         if bat:
             m["battery_present"] = True
             m["on_battery"] = not bat.power_plugged
+
+        try:
+            import wmi
+            battery_wmi = wmi.WMI(namespace="root\\wmi")
+            full = next(iter(battery_wmi.BatteryFullChargedCapacity()), None)
+            static = next(iter(battery_wmi.BatteryStaticData()), None)
+            if full and static and getattr(static, "DesignedCapacity", 0):
+                m["battery_health_pct"] = round(
+                    float(full.FullChargedCapacity) / float(static.DesignedCapacity) * 100
+                )
+        except Exception:
+            pass
 
         try:
             import wmi
@@ -656,7 +703,7 @@ class WindowsCollector(MetricCollector):
             try:
                 svc = psutil.win_service_get(svc_name)
                 info = svc.as_dict()
-                if info.get("status") != "running":
+                if info.get("start_type") == "disabled":
                     m["update_services_stopped"].append(svc_name)
             except Exception:
                 pass
@@ -751,12 +798,14 @@ class WindowsCollector(MetricCollector):
             hand = win32evtlog.OpenEventLog(None, "System")
             flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
             sys_events = []
-            while True:
+            reached_cutoff = False
+            while not reached_cutoff:
                 events = win32evtlog.ReadEventLog(hand, flags, 0)
                 if not events:
                     break
                 for ev in events:
                     if ev.TimeGenerated < since:
+                        reached_cutoff = True
                         break
                     if ev.EventType in (win32evtlog.EVENTLOG_ERROR_TYPE, win32evtlog.EVENTLOG_WARNING_TYPE):
                         sys_events.append(ev)
@@ -780,7 +829,7 @@ class WindowsCollector(MetricCollector):
             # fallback: fewer events via PowerShell
             try:
                 out = subprocess.run(
-                    ["powershell", "-Command",
+                    ["powershell", "-NoProfile", "-Command",
                      "Get-WinEvent -FilterHashtable @{LogName='System'; Level=1,2; StartTime=(Get-Date).AddDays(-7)} -MaxEvents 200 -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count"],
                     capture_output=True, text=True, timeout=15, creationflags=0x08000000
                 )
@@ -792,7 +841,7 @@ class WindowsCollector(MetricCollector):
         # App crashes
         try:
             out = subprocess.run(
-                ["powershell", "-Command",
+                ["powershell", "-NoProfile", "-Command",
                  "Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2; StartTime=(Get-Date).AddDays(-7)} -MaxEvents 100 -EA SilentlyContinue | Where-Object { $_.ProviderName -match 'Application Error|Windows Error Reporting|Application Hang' } | Measure-Object | Select-Object -ExpandProperty Count"],
                 capture_output=True, text=True, timeout=15, creationflags=0x08000000
             )
@@ -803,9 +852,10 @@ class WindowsCollector(MetricCollector):
 
     # ---- Security ----
     def _security(self, m: dict):
-        m["av_enabled"] = True
-        m["realtime_protection"] = True
-        m["defs_age_days"] = 0
+        m["av_enabled"] = None
+        m["realtime_protection"] = None
+        m["defs_age_days"] = None
+        m["firewall_enabled"] = None
         m["suspicious_count"] = 0
         m["suspicious_list"] = []
         m["hosts_custom_entries"] = 0
@@ -822,42 +872,37 @@ class WindowsCollector(MetricCollector):
                 import wmi
                 c = wmi.WMI(namespace="root\\SecurityCenter2")
                 for av in c.AntivirusProduct():
-                    m["av_enabled"] = True
+                    product_state = int(getattr(av, "productState", 0) or 0)
+                    provider_state = (product_state >> 8) & 0xFF
+                    m["av_enabled"] = provider_state in (0x10, 0x11)
                     break
             except Exception:
                 pass
 
         try:
-            import wmi
-            c = wmi.WMI(namespace="root\\SecurityCenter2")
-            for mp in c.WmiSecurityCenter() or []:
-                if hasattr(mp, "RealTimeProtectionEnabled"):
-                    m["realtime_protection"] = bool(mp.RealTimeProtectionEnabled)
-                    break
-        except Exception:
-            pass
-
-        try:
-            import wmi
-            c = wmi.WMI()
-            for mp in c.Win32_Product():
-                if "Microsoft" in (mp.Name or "") and "Defender" in (mp.Name or ""):
-                    break
-        except Exception:
-            pass
-
-        try:
             out = subprocess.run(
-                ["powershell", "-Command",
+                ["powershell", "-NoProfile", "-Command",
                  "Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, AntivirusEnabled, AntivirusSignatureAge | ConvertTo-Json -Compress"],
                 capture_output=True, text=True, timeout=10, creationflags=0x08000000
             )
             if out.returncode == 0 and out.stdout.strip():
                 import json
                 d = json.loads(out.stdout)
-                m["av_enabled"] = d.get("AntivirusEnabled", True)
-                m["realtime_protection"] = d.get("RealTimeProtectionEnabled", True)
-                m["defs_age_days"] = int(d.get("AntivirusSignatureAge", 0) or 0)
+                m["av_enabled"] = d.get("AntivirusEnabled")
+                m["realtime_protection"] = d.get("RealTimeProtectionEnabled")
+                age = d.get("AntivirusSignatureAge")
+                m["defs_age_days"] = int(age) if age is not None else None
+        except Exception:
+            pass
+
+        try:
+            status = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-NetFirewallProfile | Where-Object Enabled).Count"],
+                capture_output=True, text=True, timeout=8, creationflags=0x08000000,
+            )
+            if status.returncode == 0:
+                m["firewall_enabled"] = int(status.stdout.strip() or 0) > 0
         except Exception:
             pass
 
@@ -869,9 +914,6 @@ class WindowsCollector(MetricCollector):
 
         sus_list = []
         scan_dirs = list(dict.fromkeys([
-            tempfile.gettempdir(),
-            os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Temp"),
-            os.path.expanduser("~/Downloads"),
             os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs", "Startup"),
             os.path.join(os.environ.get("PROGRAMDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs", "Startup"),
         ]))
@@ -894,22 +936,19 @@ class WindowsCollector(MetricCollector):
                         if re.search(r"\.(vbs|js|jse|bat|cmd|ps1|wsf)$", f, re.IGNORECASE):
                             reasons.append("script set to run at startup")
                         else:
-                            from ctypes import windll
-                            sig = _try(lambda: windll.wintrust.WinVerifyTrust(0, None, fp), None)
-                            if sig and sig != 0:
+                            signature = _authenticode_status(fp)
+                            if signature in ("NotSigned", "HashMismatch", "NotTrusted"):
                                 reasons.append("unsigned item set to auto-start")
-                    elif "\\temp\\" in fp.lower() and re.search(r"\.(exe|scr|com|pif)$", f, re.IGNORECASE):
-                        from ctypes import windll
-                        sig = _try(lambda: windll.wintrust.WinVerifyTrust(0, None, fp), None)
-                        if sig and sig != 0:
-                            reasons.append("unsigned executable in a Temp folder")
                     if reasons:
-                        sus_list.append(f"{fp} [{'; '.join(reasons)}]")
+                        sus_list.append(f"{f} [{'; '.join(reasons)}]")
             except Exception:
                 pass
 
         m["suspicious_count"] = len(sus_list)
         m["suspicious_list"] = sus_list[:12]
+
+        if m["av_enabled"] is None and m["realtime_protection"] is None:
+            self.set_confidence(m, "security", "Low")
 
         # Hosts file
         hosts = os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "System32", "drivers", "etc", "hosts")
@@ -942,7 +981,7 @@ class WindowsCollector(MetricCollector):
                     f"{','.join(fields)} | ConvertTo-Json -Compress"
                 )
                 r = subprocess.run(
-                    ["powershell", "-Command", ps_cmd],
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
                     capture_output=True, text=True, timeout=15, creationflags=0x08000000
                 )
                 if r.returncode == 0 and r.stdout.strip():

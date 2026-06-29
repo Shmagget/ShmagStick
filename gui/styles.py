@@ -91,12 +91,50 @@ QPushButton[role="action"][state="scanning"] {
     border-radius: 14px;
 }
 
+#summaryPanel {
+    background: #12151C;
+    border: 1px solid #262B38;
+    border-radius: 12px;
+}
+
+QProgressBar {
+    background: #222734;
+    border: none;
+    border-radius: 2px;
+}
+QProgressBar::chunk {
+    background: #6E8BFF;
+    border-radius: 2px;
+}
+
 /* --- Category cards (also set inline for the gradient) --- */
 CategoryCard {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #161A23, stop:1 #13161E);
     border: 1px solid #262B38;
     border-radius: 16px;
 }
+
+/* --- Collapsible category sections (dropdowns) --- */
+#sectionCard {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #161A23, stop:1 #13161E);
+    border: 1px solid #262B38;
+    border-radius: 12px;
+}
+#sectionHeader {
+    background: transparent;
+    border-radius: 12px;
+}
+#sectionHeader:hover {
+    background: #1A1F2B;
+}
+#sectionBody {
+    background: #101319;
+    border-top: 1px solid #1F2430;
+    border-bottom-left-radius: 12px;
+    border-bottom-right-radius: 12px;
+}
+QLabel#scoreBadge { font-size: 15px; font-weight: bold; }
+QLabel#deepHeader { color: #B9C6E8; font-size: 12px; font-weight: bold; }
 
 /* --- Scroll area: themed so no light band bleeds on the right --- */
 QScrollArea {
@@ -148,5 +186,5 @@ QLabel#categoryStat  { color: #8B94A7; font-size: 11.5px; }
 QLabel#categoryWord  { font-size: 11px; font-weight: bold; }
 QLabel#gradeLabel    { color: #8B94A7; font-size: 14px; }
 QLabel#blurb         { color: #9AA3B5; font-size: 13px; }
-QLabel#footer        { color: #5B6376; font-size: 11px; }
+QLabel#footer        { color: #8B94A7; font-size: 11px; }
 """

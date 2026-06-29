@@ -1,13 +1,21 @@
 """Affiliate shopping link generation.
 
-Constructs Amazon URLs with regional affiliate tags.
+Constructs Amazon URLs with the ShmagStick Amazon Associates tracking tag.
+The code can ensure Amazon links carry the tag, but Amazon alone determines
+whether a click qualifies for commission under its Associates rules.
 """
 
 from __future__ import annotations
 
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
+
+
+DEFAULT_AMAZON_ASSOCIATE_TAG = "shmagstick-20"
+
+
 # Affiliate tags per Amazon TLD
 TAGS = {
-    "com": "shmagstick-20",
+    "com": DEFAULT_AMAZON_ASSOCIATE_TAG,
     "co.uk": "",
     "ca": "",
     "com.au": "",
@@ -44,7 +52,7 @@ def _detect_tld() -> str:
         pass
     try:
         import locale
-        loc = locale.getdefaultlocale()[0] or ""
+        loc = locale.getlocale()[0] or ""
         for code, tld in TLD_MAP.items():
             if code in loc.upper():
                 return tld
@@ -71,7 +79,43 @@ def get_amazon_tld() -> str:
 
 def get_tag() -> str:
     tld = get_amazon_tld()
-    return TAGS.get(tld, TAGS.get("com", ""))
+    return TAGS.get(tld) or DEFAULT_AMAZON_ASSOCIATE_TAG
+
+
+def _tag_for_tld(tld: str) -> tuple[str, str]:
+    tag = TAGS.get(tld, "")
+    if tag:
+        return tld, tag
+    return "com", DEFAULT_AMAZON_ASSOCIATE_TAG
+
+
+def is_amazon_url(url: str) -> bool:
+    host = (urlparse(url or "").netloc or "").lower()
+    return host.startswith("amazon.") or host.startswith("www.amazon.") or ".amazon." in host
+
+
+def ensure_amazon_affiliate_tag(url: str) -> str:
+    """Return an Amazon URL with the active Associates tag applied.
+
+    Non-Amazon URLs are returned unchanged. Existing Amazon `tag` values are
+    replaced with the configured ShmagStick tag to avoid stale or untagged
+    upgrade links reaching the GUI/report.
+    """
+    parsed = urlparse(url or "")
+    if parsed.scheme not in ("http", "https") or not is_amazon_url(url):
+        return url
+
+    host = parsed.netloc.lower()
+    tld = "com"
+    marker = "amazon."
+    if marker in host:
+        tld = host.split(marker, 1)[1].split(":", 1)[0]
+    tld, tag = _tag_for_tld(tld)
+
+    netloc = f"www.amazon.{tld}"
+    query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key.lower() != "tag"]
+    query.append(("tag", tag))
+    return urlunparse((parsed.scheme or "https", netloc, parsed.path, parsed.params, urlencode(query), parsed.fragment))
 
 
 def shop(query: str, asin: str = "") -> str:
@@ -86,16 +130,12 @@ def shop(query: str, asin: str = "") -> str:
         region has no associate tag of its own, so the affiliate code is
         always applied.
     """
-    from urllib.parse import quote_plus
-
     tld = get_amazon_tld()
-    tag = TAGS.get(tld, "")
-    if not tag and TAGS.get("com"):
-        tld, tag = "com", TAGS["com"]
+    tld, tag = _tag_for_tld(tld)
 
     if asin:
         url = f"https://www.amazon.{tld}/dp/{asin}"
-        return f"{url}/?tag={tag}" if tag else url
+        return ensure_amazon_affiliate_tag(url)
 
     url = f"https://www.amazon.{tld}/s?k={quote_plus(query)}"
-    return f"{url}&tag={tag}" if tag else url
+    return ensure_amazon_affiliate_tag(url)

@@ -24,11 +24,13 @@ class GaugeWidget(QWidget):
         self._size = size
         self._thickness = thickness
         self._animating = False
+        self._unavailable = False
         self.setFixedSize(size, size)
 
     def setScore(self, score: int, animate: bool = True):
         """Set the target score. Animates from current value if animate=True."""
         self._score = max(0, min(100, score))
+        self._unavailable = False
         if not animate:
             self._display_score = self._score
             self.update()
@@ -46,6 +48,12 @@ class GaugeWidget(QWidget):
         self._anim_frame = 0
         self._anim_total_frames = 20  # ~1100ms at 18fps
         self._anim_timer_id = self.startTimer(55)
+
+    def setUnavailable(self) -> None:
+        self._unavailable = True
+        self._animating = False
+        self._display_score = 0
+        self.update()
 
     def timerEvent(self, event):
         if not self._animating:
@@ -84,7 +92,7 @@ class GaugeWidget(QWidget):
                         0, 360 * 16)
 
         # Score arc
-        score_fraction = self._display_score / 100.0
+        score_fraction = 0 if self._unavailable else self._display_score / 100.0
         dash_len = circumference * score_fraction
         gap_len = circumference - dash_len
 
@@ -104,7 +112,7 @@ class GaugeWidget(QWidget):
         painter.setPen(QColor("#FFFFFF"))
         font_size = round(size * 0.31)
         painter.setFont(self._font_for_size(font_size))
-        score_text = str(self._display_score)
+        score_text = "N/A" if self._unavailable else str(self._display_score)
         text_rect = QRectF(0, size * 0.22, size, size * 0.35)
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, score_text)
 
@@ -113,7 +121,7 @@ class GaugeWidget(QWidget):
         small_size = round(size * 0.115)
         painter.setFont(self._font_for_size(small_size))
         sub_rect = QRectF(0, size * 0.575, size, size * 0.2)
-        painter.drawText(sub_rect, Qt.AlignmentFlag.AlignCenter, "/100")
+        painter.drawText(sub_rect, Qt.AlignmentFlag.AlignCenter, "" if self._unavailable else "/100")
 
     def _font_for_size(self, size: int):
         from PyQt6.QtGui import QFont

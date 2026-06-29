@@ -11,14 +11,12 @@ from datetime import datetime, timedelta
 import psutil
 
 from platforms.base import MetricCollector
+from platforms.common import average_cpu_load, folder_size_gb, process_snapshot, run_command
 
 
 def _run(cmd: list[str], timeout: int = 10) -> str:
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return r.stdout if r.returncode == 0 else ""
-    except Exception:
-        return ""
+    result = run_command(cmd, timeout)
+    return result.stdout if result.ok else ""
 
 
 def _run_json(cmd: list[str]) -> dict | list:
@@ -39,23 +37,23 @@ def _try(fn, default=None):
 
 
 class MacOSCollector(MetricCollector):
-    def collect(self) -> dict:
-        m: dict = {}
-        self._machine(m)
-        self._memory(m)
-        self._storage(m)
-        self._disk(m)
-        self._cpu(m)
-        self._gpu(m)
-        self._startup(m)
-        self._background(m)
-        self._power(m)
-        self._drivers(m)
-        self._updates(m)
-        self._network(m)
-        self._stability(m)
-        self._security(m)
-        return m
+    def collect(self, progress_callback=None) -> dict:
+        return self._collect_steps([
+            ("system", "Reading machine details", self._machine),
+            ("memory", "Checking memory", self._memory),
+            ("storage", "Checking storage space", self._storage),
+            ("diskspeed", "Checking disk type and health", self._disk),
+            ("gpu", "Checking graphics", self._gpu),
+            ("cpu", "Checking processor performance", self._cpu),
+            ("startup", "Checking login items", self._startup),
+            ("background", "Checking launch agents", self._background),
+            ("power", "Checking power and battery", self._power),
+            ("drivers", "Checking hardware warnings", self._drivers),
+            ("updates", "Checking update state", self._updates),
+            ("network", "Checking network and browsers", self._network),
+            ("stability", "Checking recent crash reports", self._stability),
+            ("security", "Checking macOS security controls", self._security),
+        ], progress_callback)
 
     def _machine(self, m: dict):
         m["machine"] = ""
@@ -64,7 +62,9 @@ class MacOSCollector(MetricCollector):
         m["board_name"] = ""
         m["cpu_socket"] = ""
         m["bios_age_days"] = None
-        m["is_laptop"] = True  # Apple only makes laptops + desktops; check battery
+        m["is_laptop"] = False
+        m["apple_silicon"] = False
+        m["platform"] = "macOS"
 
         sw_vers = _run_json(["sw_vers", "-json"])
         if isinstance(sw_vers, dict):
@@ -77,7 +77,11 @@ class MacOSCollector(MetricCollector):
             try:
                 d = json.loads(sp_hw)
                 hw = d.get("SPHardwareDataType", [{}])[0]
-                m["machine"] = hw.get("machine_model", "")
+                m["machine"] = hw.get("machine_model", "") or hw.get("machine_name", "")
+                chip = hw.get("chip_type", "")
+                if chip:
+                    m["cpu_name"] = chip
+                    m["apple_silicon"] = chip.lower().startswith("apple")
             except Exception:
                 pass
 
@@ -86,11 +90,8 @@ class MacOSCollector(MetricCollector):
         m["board_name"] = model
 
         # Battery = laptop heuristic
-        try:
-            _run(["pmset", "-g", "batt"])
-            m["is_laptop"] = True
-        except Exception:
-            m["is_laptop"] = False
+        battery_output = _run(["pmset", "-g", "batt"])
+        m["is_laptop"] = "InternalBattery" in battery_output
 
     # ---- Memory ----
     def _memory(self, m: dict):
@@ -101,18 +102,17 @@ class MacOSCollector(MetricCollector):
             (vm.used + psutil.swap_memory().used) / (vm.total + psutil.swap_memory().total) * 100, 0
         ) if (vm.total + psutil.swap_memory().total) else 0
 
-        procs = sorted(psutil.process_iter(["name", "memory_info"]),
-                       key=lambda p: p.info["memory_info"].rss or 0, reverse=True)[:5]
-        m["top_mem"] = ", ".join(
-            f"{p.info['name']} ({round((p.info['memory_info'].rss or 0) / 1024**3, 1)} GB)"
-            for p in procs
-        )
-        m["top_mem_gb"] = round((procs[0].info["memory_info"].rss or 0) / 1024**3, 1) if procs else 0
+        cpu_rows, memory_rows = process_snapshot()
+        m["top_cpu_rows"] = cpu_rows
+        m["top_mem_rows"] = memory_rows
+        m["top_mem"] = ", ".join(f"{name} ({value:.1f} GB)" for name, value in memory_rows)
+        m["top_mem_gb"] = memory_rows[0][1] if memory_rows else 0
 
-        m["ram_slots_used"] = 1
-        m["ram_slots_total"] = 1
-        m["ram_type"] = "Unified"
+        m["ram_slots_used"] = 0
+        m["ram_slots_total"] = 0
+        m["ram_type"] = "Unified" if m.get("apple_silicon") else "RAM"
         m["ram_form"] = "laptop" if m.get("is_laptop") else "desktop"
+        m["memory_upgradable"] = not m.get("apple_silicon", False)
 
         # Memory type from sysctl
         memtype_map = {
@@ -129,38 +129,23 @@ class MacOSCollector(MetricCollector):
                 if items:
                     ctype = items[0].get("dimm_comp_type", "")
                     m["ram_type"] = ctype or "Unified"
-                    m["ram_slots_total"] = len(
-                        [item for item in items if item.get("dimm_size")]
-                    )
-                    m["ram_slots_used"] = m["ram_slots_total"]
+                    m["ram_slots_total"] = len(items)
+                    m["ram_slots_used"] = len([item for item in items if item.get("dimm_size")])
             except Exception:
                 pass
 
     # ---- Storage ----
     def _storage(self, m: dict):
-        df = _run(["df", "-h", "/"])
-        m["sys_size_gb"] = 0
-        m["sys_free_gb"] = 0
-        m["sys_free_pct"] = 100
-        for line in df.strip().splitlines()[1:]:
-            parts = line.split()
-            if len(parts) >= 5:
-                size_str = parts[1]
-                avail_str = parts[3]
-                pct_str = parts[4].rstrip("%")
-                m["sys_size_gb"] = self._parse_size_gb(size_str)
-                m["sys_free_gb"] = self._parse_size_gb(avail_str)
-                try:
-                    m["sys_free_pct"] = round(int((m["sys_size_gb"] - m["sys_free_gb"]) / m["sys_size_gb"] * 100), 0)
-                except (ZeroDivisionError, TypeError):
-                    pass
-                break
+        usage = psutil.disk_usage("/")
+        m["sys_size_gb"] = round(usage.total / 1024**3, 1)
+        m["sys_free_gb"] = round(usage.free / 1024**3, 1)
+        m["sys_free_pct"] = round(usage.free / usage.total * 100) if usage.total else 0
 
         # Temp files
         temp_dirs = ["/tmp", os.path.expandvars("$TMPDIR")]
         tb = sum(_folder_gb(d, 2) for d in temp_dirs if d)
         m["temp_gb"] = round(tb, 2)
-        m["recycle_gb"] = 0.0
+        m["recycle_gb"] = _folder_gb(os.path.expanduser("~/.Trash"), 2)
 
     def _parse_size_gb(self, s: str) -> float:
         s = s.strip().upper()
@@ -180,10 +165,14 @@ class MacOSCollector(MetricCollector):
     def _disk(self, m: dict):
         m["sys_is_hdd"] = False
         m["secondary_hdds"] = []
-        m["has_ssd"] = True  # All modern Macs use SSD
+        m["has_ssd"] = False
         m["disk_health_bad"] = []
-        m["disk_busy_pct"] = 0
+        m["disk_busy_pct"] = None
         m["trim_disabled"] = False
+        m["disk_type_known"] = False
+        m["system_disk_type"] = "Unknown"
+        m["disk_models"] = []
+        m["storage_upgradable"] = not m.get("apple_silicon", False)
 
         # diskutil for info
         du = _run(["diskutil", "list", "-plist"])
@@ -193,34 +182,33 @@ class MacOSCollector(MetricCollector):
                 plist = plistlib.loads(du.encode() if isinstance(du, str) else du)
                 for disk in plist.get("AllDisksAndPartitions", []):
                     media = disk.get("Content", "").lower()
-                    if "apfs" in media or "ssd" in media:
+                    if "ssd" in media:
                         m["has_ssd"] = True
             except Exception:
                 pass
 
         # SMART
         smart = _run(["diskutil", "info", "/"])
-        if "Solid State" in smart:
+        solid_state = re.search(r"Solid State:\s*(Yes|No)", smart, re.IGNORECASE)
+        if solid_state and solid_state.group(1).lower() == "yes":
             m["has_ssd"] = True
-        elif "Rotational" in smart:
+            m["disk_type_known"] = True
+            m["system_disk_type"] = "SSD/NVMe"
+        elif (solid_state and solid_state.group(1).lower() == "no") or "Rotational" in smart:
             m["sys_is_hdd"] = True
+            m["disk_type_known"] = True
+            m["system_disk_type"] = "HDD"
+        model_match = re.search(r"Device / Media Name:\s*(.+)", smart)
+        if model_match:
+            m["disk_models"].append(model_match.group(1).strip())
+        smart_match = re.search(r"SMART Status:\s*(.+)", smart)
+        if smart_match and smart_match.group(1).strip().lower() not in ("verified", "not supported"):
+            m["disk_health_bad"].append(smart_match.group(1).strip())
 
         # TRIM
         trim = _run(["system_profiler", "SPNVMeDataType", "-json"])
         if "TRIM" in trim and "Disabled" in trim:
             m["trim_disabled"] = True
-
-        # iostat for disk busy
-        iostat = _run(["iostat", "-w", "1", "-n", "1"])
-        for line in iostat.splitlines():
-            if "disk0" in line or "disk1" in line:
-                parts = line.split()
-                try:
-                    busy = float(parts[-1])  # % utilization
-                    m["disk_busy_pct"] = int(min(100, busy))
-                except (IndexError, ValueError):
-                    pass
-                break
 
     # ---- CPU ----
     def _cpu(self, m: dict):
@@ -235,27 +223,25 @@ class MacOSCollector(MetricCollector):
         freq = psutil.cpu_freq()
         m["cpu_max_mhz"] = int(freq.max) if freq and freq.max else 0
         m["cpu_current_mhz"] = int(freq.current) if freq and freq.current else 0
-        m["cpu_load_pct"] = int(psutil.cpu_percent(interval=0.1))
+        m["cpu_load_pct"] = average_cpu_load()
         m["cpu_clock_pct"] = (
             round(m["cpu_current_mhz"] / m["cpu_max_mhz"] * 100, 0)
             if m["cpu_max_mhz"] > 0 and m["cpu_current_mhz"] > 0 else 0
         )
 
         # CPU name from sysctl
-        sp_cpu = _run(["sysctl", "-n", "machdep.cpu.brand_string"]).strip()
+        sp_cpu = m.get("cpu_name") or _run(["sysctl", "-n", "machdep.cpu.brand_string"]).strip()
         if sp_cpu:
             m["cpu_name"] = sp_cpu
 
         # Apple Silicon detection
-        cpu_brand = _run(["sysctl", "-n", "machdep.cpu.brand_string"]).strip()
-        if "Apple" in cpu_brand or "M1" in cpu_brand or "M2" in cpu_brand or "M3" in cpu_brand:
+        cpu_brand = sp_cpu
+        if m.get("apple_silicon") or re.search(r"\bM[1-9]", cpu_brand):
             m["cpu_name"] = cpu_brand or "Apple Silicon"
             m["cpu_socket"] = "BGA (soldered)"
 
-        procs = sorted(psutil.process_iter(["name", "cpu_times"]),
-                       key=lambda p: (p.info["cpu_times"].user + p.info["cpu_times"].system)
-                       if p.info["cpu_times"] else 0, reverse=True)[:3]
-        m["top_cpu"] = ", ".join(sorted(set(p.info["name"] for p in procs if p.info["name"])))
+        cpu_rows = m.get("top_cpu_rows") or process_snapshot()[0]
+        m["top_cpu"] = ", ".join(f"{name} ({value:.0f}%)" for name, value in cpu_rows)
 
         m["uptime_days"] = round((datetime.now().timestamp() - psutil.boot_time()) / 86400, 1)
 
@@ -279,7 +265,7 @@ class MacOSCollector(MetricCollector):
             "can_buy": False,
             "text": "CPU is soldered (Apple Silicon / BGA) - not upgradable",
             "query": "",
-            "note": "All modern Macs use soldered CPUs. Focus on RAM, storage, and GPU (eGPU over Thunderbolt if supported).",
+            "note": "Mac CPUs are not field-upgradable. Apple Silicon also has fixed unified memory and internal storage; Intel Mac capabilities vary by exact model.",
             "confidence": "Apple soldered CPU",
             "recommended": "",
             "rank": 0,
@@ -303,21 +289,23 @@ class MacOSCollector(MetricCollector):
                 displays = d.get("SPDisplaysDataType", [{}])
                 if displays:
                     disp = displays[0]
-                    name = disp.get("spserial_display_primary", "") or disp.get("_name", "")
+                    name = disp.get("sppci_model", "") or disp.get("_name", "")
                     if not name:
                         name = disp.get("spdisplays_vendor", "") + " " + disp.get("spdisplays_model", "")
                     m["gpus"].append(name)
 
                     # Apple Silicon: unified memory
-                    mem_shared = disp.get("spdisplays_mtlmegabytes", "0")
-                    if mem_shared:
-                        m["vram_gb"] = round(int(mem_shared) / 1024**2 / 1024, 1)
-                        m["has_dedicated_gpu"] = bool(disp.get("spdisplays_vendor", "").lower() != "apple")
+                    vram_text = str(disp.get("spdisplays_vram", "") or disp.get("spdisplays_vram_shared", ""))
+                    vram_match = re.search(r"([\d.]+)\s*(GB|MB)", vram_text, re.IGNORECASE)
+                    if vram_match:
+                        value = float(vram_match.group(1))
+                        m["vram_gb"] = round(value if vram_match.group(2).upper() == "GB" else value / 1024, 1)
+                    vendor = str(disp.get("spdisplays_vendor", ""))
+                    m["has_dedicated_gpu"] = bool(re.search(r"AMD|NVIDIA", vendor + " " + name, re.IGNORECASE))
 
-                    if "Apple" in name or not m["has_dedicated_gpu"]:
+                    if m.get("apple_silicon"):
                         m["has_dedicated_gpu"] = False
-                        # Total system RAM is effectively unified VRAM for Apple Silicon
-                        m["vram_gb"] = max(m["vram_gb"], m.get("ram_total_gb", 0))
+                        m["vram_gb"] = 0
 
                     m["gpu_details"].append({
                         "name": name, "dedicated": m["has_dedicated_gpu"],
@@ -340,9 +328,9 @@ class MacOSCollector(MetricCollector):
 
         # launchctl list
         launch = _run(["launchctl", "list"])
-        for line in launch.strip().splitlines()[1:]:  # skip header
+        for line in launch.strip().splitlines()[1:]:
             parts = line.split()
-            if parts and not parts[0].startswith("-"):
+            if parts and not parts[-1].startswith("com.apple."):
                 items.append(parts[-1])
 
         # User launch agents
@@ -352,6 +340,7 @@ class MacOSCollector(MetricCollector):
                 if f.endswith(".plist"):
                     items.append(f.replace(".plist", ""))
 
+        items = sorted(set(items))
         m["startup_count"] = len(items)
         m["startup_names"] = ", ".join(items[:12])
 
@@ -364,8 +353,6 @@ class MacOSCollector(MetricCollector):
             os.path.expanduser("~/Library/LaunchAgents"),
             "/Library/LaunchAgents",
             "/Library/LaunchDaemons",
-            "/System/Library/LaunchAgents",
-            "/System/Library/LaunchDaemons",
         ]:
             if os.path.isdir(agent_dir):
                 try:
@@ -375,7 +362,8 @@ class MacOSCollector(MetricCollector):
                 except (OSError, PermissionError):
                     pass
 
-        m["third_party_service_count"] = max(5, len(svc_items))
+        svc_items = sorted(set(svc_items))
+        m["third_party_service_count"] = len(svc_items)
         m["third_party_service_names"] = ", ".join(svc_items[:12])
 
         # Cron
@@ -384,7 +372,7 @@ class MacOSCollector(MetricCollector):
         for line in crontab.splitlines():
             if line.strip() and not line.startswith("#"):
                 task_items.append(line.split()[-1].split("/")[-1])
-        m["scheduled_task_count"] = max(3, len(task_items))
+        m["scheduled_task_count"] = len(task_items)
         m["scheduled_task_names"] = ", ".join(task_items[:12])
 
     # ---- Power ----
@@ -393,12 +381,20 @@ class MacOSCollector(MetricCollector):
         m["power_saver"] = False
         m["on_battery"] = False
         m["battery_present"] = False
+        m["battery_health_pct"] = None
         m["thermal_temp_c"] = 0
 
         bat = _try(lambda: psutil.sensors_battery(), None)
         if bat:
             m["battery_present"] = True
             m["on_battery"] = not bat.power_plugged
+
+        power_json = _run_json(["system_profiler", "SPPowerDataType", "-json"])
+        if isinstance(power_json, dict):
+            payload = str(power_json)
+            maximum = re.search(r"maximum_capacity[^0-9]*(\d+)", payload, re.IGNORECASE)
+            if maximum:
+                m["battery_health_pct"] = int(maximum.group(1))
 
         # Thermal
         if m["battery_present"]:
@@ -412,8 +408,9 @@ class MacOSCollector(MetricCollector):
         # Power profile
         try:
             pmset = _run(["pmset", "-g", "custom"])
-            if "powermode" in pmset.lower():
-                m["power_plan"] = pmset.strip()
+            low_power = bool(re.search(r"lowpowermode\s+1", pmset, re.IGNORECASE))
+            m["power_saver"] = low_power
+            m["power_plan"] = "Low Power Mode" if low_power else "Automatic"
         except Exception:
             pass
 
@@ -424,20 +421,13 @@ class MacOSCollector(MetricCollector):
         m["old_driver_count"] = 0
         m["old_driver_names"] = ""
 
-        # kextstat for kernel extensions
-        kextstat = _run(["kextstat"])
-        bad_kexts = []
-        for line in kextstat.splitlines()[1:]:
-            if "com.apple" not in line and line.strip():
-                parts = line.split()
-                if len(parts) >= 6:
-                    # check for error in refs
-                    refs = parts[4]
-                    if re.search(r"\d+", refs):
-                        bad_kexts.append(" ".join(parts[5:6]))
-
-        m["problem_device_count"] = len(bad_kexts[:10])
-        m["problem_device_names"] = ", ".join(bad_kexts[:8])
+        disabled = _run_json(["system_profiler", "SPDisabledSoftwareDataType", "-json"])
+        items = disabled.get("SPDisabledSoftwareDataType", []) if isinstance(disabled, dict) else []
+        warnings = [str(item.get("_name", "Disabled system extension")) for item in items if isinstance(item, dict)]
+        m["problem_device_count"] = len(warnings)
+        m["problem_device_names"] = ", ".join(warnings[:8])
+        if not disabled:
+            self.set_confidence(m, "drivers", "Low")
 
     # ---- Updates ----
     def _updates(self, m: dict):
@@ -445,31 +435,23 @@ class MacOSCollector(MetricCollector):
         m["reboot_pending"] = False
         m["update_services_stopped"] = []
 
-        # softwareupdate last check
-        su = _run(["softwareupdate", "-l"])
-        # Check last check date from log
-        log = _run(["log", "show", "--predicate", 'eventMessage contains "softwareupdate"',
-                    "--last", "7d", "--style", "compact", "-n", "1"])
-        if log:
-            m["last_update_days"] = 0
-
-        if m["last_update_days"] is None:
-            # check installer receipts
-            receipts = "/var/db/receipts/"
-            if os.path.isdir(receipts):
-                latest = 0
-                for f in os.listdir(receipts):
-                    if "InstallHistory" in f or f.endswith(".plist"):
-                        continue
-                    fp = os.path.join(receipts, f)
-                    mtime = _try(lambda: os.path.getmtime(fp), 0)
-                    if mtime and mtime > latest:
-                        latest = mtime
-                if latest:
-                    m["last_update_days"] = int((datetime.now().timestamp() - latest) / 86400)
+        try:
+            import plistlib
+            with open("/Library/Receipts/InstallHistory.plist", "rb") as history_file:
+                history = plistlib.load(history_file)
+            dates = [
+                item.get("date") for item in history
+                if isinstance(item, dict)
+                and item.get("date")
+                and re.search(r"macOS|Security Update|Rapid Security", str(item.get("displayName", "")), re.IGNORECASE)
+            ]
+            if dates:
+                latest = max(dates)
+                m["last_update_days"] = max(0, (datetime.now(latest.tzinfo) - latest).days)
+        except (OSError, ValueError, TypeError):
+            self.set_confidence(m, "updates", "Low")
 
         # Reboot pending: check if softwareupdate needs restart
-        reboot_file = "/var/db/.AppleSetupDone"
         m["reboot_pending"] = os.path.exists("/.RestartAction") or os.path.exists("/var/run/reboot-required")
 
     # ---- Network / Browser ----
@@ -523,8 +505,6 @@ class MacOSCollector(MetricCollector):
                 p0 = os.path.join(root, pdir)
                 if not os.path.isdir(p0):
                     continue
-                if "Firefox" in root:
-                    p0 = pdir  # firefox dirs are already profile dirs
                 ext_path = os.path.join(p0, "Extensions")
                 if os.path.isdir(ext_path):
                     try:
@@ -556,55 +536,38 @@ class MacOSCollector(MetricCollector):
         m["bug_check_count"] = 0
         m["app_crash_count"] = 0
 
-        # Use unified log for panic/kernel panics
-        since = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-        panic = _run([
-            "log", "show",
-            "--predicate", 'eventMessage contains "panic" or eventMessage contains "kernel"',
-            "--last", "7d", "-n", "50"
-        ])
-        m["bug_check_count"] = panic.count("panic")
-
-        # App crashes from crash reporter
-        crash_dir = os.path.expanduser("~/Library/Logs/DiagnosticReports")
-        if os.path.isdir(crash_dir):
-            cutoff = datetime.now() - timedelta(days=7)
-            crash_count = 0
-            for f in os.listdir(crash_dir):
-                if f.endswith(".ips") or f.endswith(".crash"):
-                    fp = os.path.join(crash_dir, f)
-                    mt = _try(lambda: os.path.getmtime(fp), 0)
-                    if mt and datetime.fromtimestamp(mt) > cutoff:
-                        crash_count += 1
-            m["app_crash_count"] = crash_count
+        cutoff = datetime.now() - timedelta(days=7)
+        for crash_dir in (os.path.expanduser("~/Library/Logs/DiagnosticReports"), "/Library/Logs/DiagnosticReports"):
+            if not os.path.isdir(crash_dir):
+                continue
+            for filename in os.listdir(crash_dir):
+                path = os.path.join(crash_dir, filename)
+                modified = _try(lambda: os.path.getmtime(path), 0)
+                if not modified or datetime.fromtimestamp(modified) <= cutoff:
+                    continue
+                if filename.endswith(".panic") or "panic" in filename.lower():
+                    m["bug_check_count"] += 1
+                elif filename.endswith((".ips", ".crash")):
+                    m["app_crash_count"] += 1
 
     # ---- Security ----
     def _security(self, m: dict):
-        m["av_enabled"] = True  # XProtect always on
-        m["realtime_protection"] = True
-        m["defs_age_days"] = 0
+        m["av_enabled"] = None
+        m["realtime_protection"] = None
+        m["defs_age_days"] = None
         m["suspicious_count"] = 0
         m["suspicious_list"] = []
         m["hosts_custom_entries"] = 0
+        m["firewall_enabled"] = None
 
         # XProtect version
         xprotect = _run(["system_profiler", "SPXProtectDataType", "-json"])
         if xprotect:
             m["av_enabled"] = True
-
-        # Suspicious files
-        exe_ext = re.compile(r"\.(dmg|pkg|app|command|sh|py|rb)$", re.IGNORECASE)
-        double_ext = re.compile(
-            r"\.(?:pdf|doc|docx|xls|xlsx|jpg|png|zip|rar|txt|csv|htm|html)"
-            r"\.(?:command|sh|py|rb|app|dmg|pkg)$",
-            re.IGNORECASE,
-        )
+            m["realtime_protection"] = True
 
         sus = []
-        for d in [
-            os.path.expanduser("~/Downloads"),
-            "/tmp",
-        ]:
+        for d in [os.path.expanduser("~/Library/LaunchAgents")]:
             if not os.path.isdir(d):
                 continue
             try:
@@ -612,10 +575,8 @@ class MacOSCollector(MetricCollector):
                     fp = os.path.join(d, f)
                     if not os.path.isfile(fp):
                         continue
-                    if not exe_ext.search(f):
-                        continue
-                    if double_ext.search(f):
-                        sus.append(f"{fp} [disguised double extension]")
+                    if f.lower().endswith((".command", ".sh", ".py", ".rb")):
+                        sus.append(f"{f} [script configured in a startup location]")
             except (OSError, PermissionError):
                 pass
 
@@ -624,21 +585,11 @@ class MacOSCollector(MetricCollector):
 
         # Gatekeeper status
         gk = _run(["spctl", "--status"])
-        m["gatekeeper_enabled"] = "enabled" in gk.lower() if gk else False
+        m["gatekeeper_enabled"] = "enabled" in gk.lower() if gk else None
+        firewall = _run(["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"])
+        if firewall:
+            m["firewall_enabled"] = "enabled" in firewall.lower()
 
 
 def _folder_gb(path: str, depth: int = 2) -> float:
-    if not path or not os.path.isdir(path):
-        return 0.0
-    total = 0
-    for root, dirs, files in os.walk(path):
-        level = root.replace(path, "").count(os.sep)
-        if level > depth:
-            dirs[:] = []
-            continue
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(root, f))
-            except OSError:
-                pass
-    return round(total / 1024**3, 2)
+    return folder_size_gb(path, depth)
