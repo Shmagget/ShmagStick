@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ShmagStick — Free PC Health Scanner & Upgrade Advisor</title>
+<meta name="description" content="ShmagStick is a free Windows desktop tool that scans your PC, scores 13 areas of its health, and recommends the best upgrade to fix each one.">
+<style>
+  :root{--bg:#0d0f14;--card:#1b2030;--line:#2a3145;--txt:#e8edf6;--mut:#8b95ab;--g:#22d39a;--gold:#ffc857;--accent:#4ea1ff}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:'Segoe UI',system-ui,Arial,sans-serif;color:var(--txt);
+       background:radial-gradient(1100px 600px at 70% -10%,#1c2336 0%,var(--bg) 55%)}
+  .wrap{max-width:1000px;margin:0 auto;padding:40px 22px 70px}
+  header{text-align:center;margin-bottom:8px}
+  .logo{font-size:13px;letter-spacing:4px;color:var(--mut);text-transform:uppercase}
+  h1{font-size:44px;margin:6px 0 10px}
+  .tag{color:var(--mut);font-size:18px;max-width:640px;margin:0 auto;line-height:1.5}
+  .cta{display:inline-block;margin:22px 8px 0;padding:13px 26px;border-radius:11px;font-weight:700;
+       font-size:15px;text-decoration:none;cursor:pointer}
+  .cta.primary{background:var(--g);color:#08110d}
+  .cta.ghost{background:#1e2740;color:#cfe0ff;border:1px solid #33406a}
+  .shot{display:block;width:100%;max-width:920px;margin:34px auto 0;border-radius:16px;
+        border:1px solid var(--line);box-shadow:0 14px 50px rgba(0,0,0,.45)}
+  h2{font-size:24px;margin:54px 0 16px;text-align:center}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
+  .card h3{margin:0 0 6px;font-size:17px}
+  .card p{margin:0;color:var(--mut);font-size:14px;line-height:1.5}
+  ol.steps{max-width:680px;margin:0 auto;padding-left:22px;color:var(--mut);font-size:15px;line-height:1.9}
+  ol.steps b{color:var(--txt)}
+  .note{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;
+        color:var(--mut);font-size:13px;line-height:1.6;margin-top:40px}
+  footer{text-align:center;color:#5e6678;font-size:12px;margin-top:40px;line-height:1.8}
+  a{color:var(--gold)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">System Health Scanner</div>
+    <h1>ShmagStick</h1>
+    <p class="tag">A free, cross-platform tool (Windows, macOS &amp; Linux) that scans your PC like an OBD2 scanner
+       for cars — it scores 13 areas of your computer's health and tells you the best upgrade to make each one faster.</p>
+    <a class="cta primary" href="https://github.com/Shmagget/ShmagStick">Download on GitHub</a>
+    <a class="cta ghost" href="https://github.com/Shmagget/ShmagStick/archive/refs/heads/main.zip">Get the ZIP</a>
+    <img class="shot" src="screenshot.png" alt="ShmagStick dashboard showing 13 health gauges">
+  </header>
+
+  <h2>What it checks</h2>
+  <div class="grid">
+    <div class="card"><h3>🧠 Memory (RAM)</h3><p>Total RAM vs. how you use the PC, plus live memory and commit pressure.</p></div>
+    <div class="card"><h3>💾 Storage Space</h3><p>Free space on your system drive and how much junk is clogging it.</p></div>
+    <div class="card"><h3>⚡ Disk Speed &amp; Health</h3><p>HDD vs SSD on the boot drive, SMART health, and TRIM.</p></div>
+    <div class="card"><h3>🔥 CPU</h3><p>Cores, live load, clock behavior, and a motherboard-compatible upgrade pick.</p></div>
+    <div class="card"><h3>🎮 Graphics (GPU)</h3><p>Dedicated vs integrated, VRAM, and graphics-driver age.</p></div>
+    <div class="card"><h3>🚀 Startup &amp; Boot</h3><p>How many programs launch at boot and drag down your login time.</p></div>
+    <div class="card"><h3>⚙️ Background Apps</h3><p>Third-party services and scheduled tasks running in the background.</p></div>
+    <div class="card"><h3>🌡️ Power &amp; Thermals</h3><p>Power plan, battery state, and heat/throttling when Windows exposes it.</p></div>
+    <div class="card"><h3>🔧 Drivers &amp; Devices</h3><p>Device Manager errors, old key drivers, and BIOS age.</p></div>
+    <div class="card"><h3>🔄 Windows Updates</h3><p>Pending restarts and how far behind Windows Update is.</p></div>
+    <div class="card"><h3>🌐 Network &amp; Browser</h3><p>Link speed, Wi-Fi signal, browser extensions and cache size.</p></div>
+    <div class="card"><h3>📈 Stability Logs</h3><p>Recent disk, hardware (WHEA), blue-screen, and app-crash events.</p></div>
+    <div class="card"><h3>🛡️ Security &amp; Malware</h3><p>Antivirus status plus a scan for suspicious files in risky locations.</p></div>
+  </div>
+
+  <h2>How it works</h2>
+  <ol class="steps">
+    <li><b>Scan.</b> Run ShmagStick — it reads your PC's vitals in a few seconds. It only diagnoses; it never changes anything.</li>
+    <li><b>Score.</b> Each area gets a 0–100 grade, tuned to your device type (desktop or laptop) and whether you use the PC for everyday tasks, gaming, or a workstation.</li>
+    <li><b>Upgrade.</b> For each area scoring below 85, it suggests the best part for <i>your</i> hardware — and never recommends a desktop graphics card or a CPU swap on a laptop — then links you straight to it.</li>
+  </ol>
+
+  <h2>Recommended upgrades</h2>
+  <p style="text-align:center;color:var(--mut);max-width:640px;margin:0 auto;font-size:15px;line-height:1.6">
+     When a section scores below 85 and a part can fix it — more RAM, an SSD, a graphics card — ShmagStick points you
+     to the best-rated option that fits your machine.</p>
+
+  <div class="note">
+    <b>Affiliate disclosure:</b> some of the "suggested upgrade" links on this site and in the app are affiliate
+    links. If you buy through them, ShmagStick may earn a small commission at no extra cost to you. As an Amazon
+    Associate we earn from qualifying purchases. Recommendations are based only on what your PC actually needs.
+  </div>
+
+  <footer>
+    ShmagStick is free and open source · <a href="https://github.com/Shmagget/ShmagStick">github.com/Shmagget/ShmagStick</a><br>
+    © 2026 Shmagget · MIT License
+  </footer>
+</div>
+</body>
+</html>

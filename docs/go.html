@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Redirecting&hellip; &middot; ShmagStick</title>
+<style>
+  body{font-family:'Segoe UI',Arial,sans-serif;background:#0d0f14;color:#e8edf6;margin:0;
+       min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center}
+  .box{max-width:480px;padding:28px}
+  h2{margin:0 0 10px}
+  p{color:#8b95ab;font-size:14px;line-height:1.5}
+  a{color:#ffc857}
+</style>
+</head>
+<body>
+  <div class="box">
+    <h2>Opening the recommended upgrade&hellip;</h2>
+    <p>Redirecting to Amazon. This is an <b>affiliate link</b> &mdash; if you buy something,
+       ShmagStick may earn a small commission at no extra cost to you.</p>
+    <p><a id="manual" href="https://www.amazon.com/">Click here if you are not redirected automatically.</a></p>
+  </div>
+
+<script>
+/* ============================================================
+   STEP 1: paste your Amazon Associates tracking tag(s) here.
+   You get a tag when you join https://affiliate-program.amazon.com
+   Each Amazon region needs its own Associates account + tag.
+   Fill in the ones you have; leave the rest blank.
+   Example: 'com':'shmagget-20'
+   ============================================================ */
+var TAGS = {
+  'com':'shmagstick-20',  'co.uk':'',  'ca':'',     'com.au':'', 'de':'',
+  'fr':'',       'it':'',     'es':'',     'in':'',     'co.jp':'',
+  'nl':'',       'se':'',     'pl':'',     'com.mx':'', 'com.br':'',
+  'sg':'',       'ae':''
+};
+
+/* --- redirect logic (no need to edit below) --- */
+var ALLOWED = Object.keys(TAGS);
+function qp(n){ return new URLSearchParams(window.location.search).get(n); }
+
+var r = (qp('r') || 'com').toLowerCase();
+if (ALLOWED.indexOf(r) < 0) r = 'com';     // whitelist guard (no open redirect)
+if (!TAGS[r]) { r = 'com'; }               // tag fallback: a region with no tag goes to amazon.com so the link is never untagged
+
+var k    = qp('k') || '';
+var asin = (qp('asin') || '').replace(/[^A-Za-z0-9]/g, '');
+var tag = TAGS[r] || '';
+
+var url = asin
+        ? ('https://www.amazon.' + r + '/dp/' + encodeURIComponent(asin)
+           + (tag ? '?tag=' + encodeURIComponent(tag) : ''))
+        : ('https://www.amazon.' + r + '/s?k=' + encodeURIComponent(k) + '&s=review-rank'
+           + (tag ? '&tag=' + encodeURIComponent(tag) : ''));
+
+document.getElementById('manual').setAttribute('href', url);
+window.location.replace(url);
+</script>
+</body>
+</html>
